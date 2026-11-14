@@ -328,6 +328,13 @@ describe("page runtime", () => {
 				},
 			],
 		});
+		// The module may not record its own errors: Node logs it either way.
+		expect(sent).toContainEqual({
+			type: "failure",
+			module: "broken",
+			handler: "install",
+			error: "Error: no RTCPeerConnection",
+		});
 	});
 
 	it("encodes and decodes bytes, large ones in chunks", () => {

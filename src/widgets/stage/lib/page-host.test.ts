@@ -331,6 +331,31 @@ describe("page host", () => {
 		expect(harness.seen()).toContain("p1:state");
 	});
 
+	it("starts every other module when one module's state() throws, and says whose", async () => {
+		const harness = setup();
+		const error = vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		harness.host.register({
+			...harness.module,
+			id: "broken",
+			state: () => {
+				throw new Error("bug in state()");
+			},
+		});
+		harness.host.register(harness.module);
+		await harness.host.attach(harness.attachment);
+		harness.context.newPage().load();
+		await vi.waitFor(() =>
+			expect(error).toHaveBeenCalledWith(
+				"page module failed to give its state",
+				{ module: "broken" },
+				expect.objectContaining({ message: "bug in state()" }),
+			),
+		);
+		// Before, the throw ended the hello: no module in the page got a state.
+		await harness.host.sync();
+		expect(harness.seen()).toContain("p1:state");
+	});
+
 	it("seals registration at the first attach and refuses duplicates", async () => {
 		const harness = setup();
 		harness.host.register(harness.module);

@@ -29,7 +29,7 @@ export type RuntimeMessage =
 			/** A module's own handler threw, with no call to reject: Node logs it. */
 			readonly type: "failure";
 			readonly module: string;
-			/** `onState` or `onDetach`. */
+			/** `install`, `onState` or `onDetach`. */
 			readonly handler: string;
 			readonly error: string;
 	  };
@@ -203,9 +203,10 @@ export function pageRuntime(
 				},
 			});
 		} catch (error) {
-			// A broken module must not take the page down with it; report it as
-			// an entry so the failure shows on the timeline.
+			// A broken module must not take the page down with it: an entry puts
+			// the failure on its timeline, and Node logs it against the module.
 			emit({ type: "error", at: now(), text: String(error) });
+			report(module.id, "install", error);
 		}
 	}
 

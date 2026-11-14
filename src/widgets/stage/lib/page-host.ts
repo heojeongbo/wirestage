@@ -173,7 +173,18 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 	): unknown => {
 		if (message.type === "hello") {
 			const states: Record<string, unknown> = {};
-			for (const [id, module] of modules) states[id] = module.state();
+			for (const [id, module] of modules)
+				try {
+					states[id] = module.state();
+				} catch (error) {
+					// One plugin's bug: its module starts without a state, every
+					// other module with its own, and the log says whose it was.
+					deps.log.error(
+						"page module failed to give its state",
+						{ module: id },
+						error,
+					);
+				}
 			return states;
 		}
 		const page = deps.pageId(source.page);
