@@ -3,8 +3,9 @@
  * which numbers them the same way.
  *
  * Structure:
- *  S1. A source file is a package entrypoint (`src/<name>.ts`) or sits in a
- *      unit: a slice `<layer>/<slice>/…`, or a shared module
+ *  S1. Every file under `src` is TypeScript (`.ts`, `.mts`, `.cts`, `.tsx`),
+ *      and is a package entrypoint (`src/<name>.ts`) or sits in a unit: a
+ *      slice `<layer>/<slice>/…`, or a shared module
  *      `shared/<api|lib>/<module>/…`.
  *  S2. A unit has one `index.ts`, at its root: its public API.
  *  S3. A slice holds `index.ts` and FSD segments (`api`, `config`, `lib`,
@@ -16,13 +17,13 @@
  *     cross-import notation between entities: `entities/<a>` may import
  *     `entities/<b>/@x/<a>.js`, and nobody else may.
  *  3. Anything outside a unit goes through its `index.js`; anything inside
- *     goes around it.
+ *     goes around it. A unit re-exports only its own modules.
  *  4. In a slice, `model` (the types) does not import `lib` (the code).
  *  5. The core knows no protocol: only a package entrypoint imports a feature.
  *  6. `shared/lib` is pure: it does not import `shared/api`.
- *  7. An entrypoint re-exports public APIs and nothing else: `index.ts` what
- *     lies below the features, `playwright.ts` the fixture, `<name>.ts` the
- *     feature of that name.
+ *  7. An entrypoint is `export … from` statements and nothing else:
+ *     `index.ts` re-exports what lies below the features, `playwright.ts`
+ *     the fixture, `<name>.ts` the feature of that name.
  *
  * Clean architecture (the dependency rule for code that is not ours):
  *  8. Playwright is named only by `app/playwright`, and only as types.
@@ -34,9 +35,13 @@
  * 13. Below the stage, the only Playwright ports are `PagePort` and
  *     `CookieJarPort`, as types: a plugin is never handed the browser context.
  * 14. A module specifier is a string literal, and there is no `require`.
+ *     `process.getBuiltinModule()` counts as an import.
  *
  * Tests and `__fixtures__` are not shipped and are not checked, but shipped
  * code may not import them.
+ *
+ * The checker reads syntax, not types: a type alias of a port, or a Node
+ * global such as `Buffer`, is not traced.
  */
 import { builtinModules } from "node:module";
 import { posix } from "node:path";
@@ -50,7 +55,10 @@ const SHARED_SEGMENTS = new Set(["api", "lib"]);
 const PLUGIN_PORTS = new Set(["PagePort", "CookieJarPort"]);
 
 const isTestCode = (path: string): boolean =>
-	/\.test\.[jt]s$/.test(path) || path.split("/").includes("__fixtures__");
+	/\.test\.[cm]?[jt]sx?$/.test(path) ||
+	path.split("/").includes("__fixtures__");
+
+const isTypeScript = (path: string): boolean => /\.[cm]?tsx?$/.test(path);
 
 /** Where a path lives: its unit, and what is left of the path inside it. */
 interface Place {
@@ -83,6 +91,8 @@ interface Reference {
 	/** The names taken from the module; `undefined` for all of it. */
 	readonly names: readonly string[] | undefined;
 	readonly require: boolean;
+	/** `export … from`: the file hands the module on as its own. */
+	readonly reexport: boolean;
 }
 
 const literal = (node: ts.Node | undefined): string | undefined =>
@@ -117,6 +127,7 @@ function referencesOf(source: ts.SourceFile): Reference[] {
 								(element) => (element.propertyName ?? element.name).text,
 							),
 				require: false,
+				reexport: false,
 			});
 		} else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
 			const named =
@@ -130,6 +141,7 @@ function referencesOf(source: ts.SourceFile): Reference[] {
 					(element) => (element.propertyName ?? element.name).text,
 				),
 				require: false,
+				reexport: true,
 			});
 		} else if (
 			ts.isImportEqualsDeclaration(node) &&
@@ -140,6 +152,7 @@ function referencesOf(source: ts.SourceFile): Reference[] {
 				typeOnly: node.isTypeOnly,
 				names: undefined,
 				require: true,
+				reexport: false,
 			});
 		} else if (ts.isImportTypeNode(node)) {
 			let qualifier = node.qualifier;
@@ -152,17 +165,24 @@ function referencesOf(source: ts.SourceFile): Reference[] {
 				typeOnly: true,
 				names: qualifier === undefined ? undefined : [qualifier.text],
 				require: false,
+				reexport: false,
 			});
 		} else if (ts.isCallExpression(node)) {
-			const dynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
-			const required =
-				ts.isIdentifier(node.expression) && node.expression.text === "require";
-			if (dynamic || required)
+			const callee = node.expression;
+			const dynamic = callee.kind === ts.SyntaxKind.ImportKeyword;
+			const required = ts.isIdentifier(callee) && callee.text === "require";
+			// `process.getBuiltinModule("node:fs")` loads a module as surely as
+			// an import does.
+			const builtin =
+				ts.isPropertyAccessExpression(callee) &&
+				callee.name.text === "getBuiltinModule";
+			if (dynamic || required || builtin)
 				found.push({
 					specifier: literal(node.arguments[0]),
 					typeOnly: false,
 					names: undefined,
 					require: required,
+					reexport: false,
 				});
 		}
 		ts.forEachChild(node, visit);
@@ -261,6 +281,8 @@ function checkModule(
 			return "model does not import lib (rule 4)";
 		return undefined;
 	}
+	if (reference.reexport)
+		return "a unit re-exports only its own modules (rule 3)";
 	if (crossImport)
 		return from.layer === "entities" &&
 			to.layer === "entities" &&
@@ -292,6 +314,10 @@ function checkStructure(paths: readonly string[]): string[] {
 	const errors: string[] = [];
 	const units = new Set<string>();
 	for (const path of paths) {
+		if (!isTypeScript(path)) {
+			errors.push(`${path} — src holds TypeScript only (rule S1)`);
+			continue;
+		}
 		if (!path.includes("/")) continue;
 		const place = placeOf(path);
 		if (place === undefined) {
@@ -330,12 +356,22 @@ export function checkBoundaries(files: ReadonlyMap<string, string>): string[] {
 		const from = placeOf(file);
 		// A misplaced file was reported above; its imports have no rules to
 		// be held to.
-		if (from === undefined && file.includes("/")) continue;
+		if (!isTypeScript(file) || (from === undefined && file.includes("/")))
+			continue;
 		const source = ts.createSourceFile(
 			file,
 			files.get(file) as string,
 			ts.ScriptTarget.Latest,
 		);
+		if (from === undefined)
+			for (const statement of source.statements)
+				if (
+					!ts.isExportDeclaration(statement) ||
+					statement.moduleSpecifier === undefined
+				)
+					errors.push(
+						`${file} — an entrypoint is export … from statements only (rule 7)`,
+					);
 		for (const reference of referencesOf(source)) {
 			const { specifier } = reference;
 			const where = `${file}: ${specifier === undefined ? "(computed)" : `"${specifier}"`}`;

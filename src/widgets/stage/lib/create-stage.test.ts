@@ -81,9 +81,16 @@ describe("createStage", () => {
 		expect(services.timeline).toBe(stage.timeline);
 		expect(services.baseURL).toBe("http://app.test");
 		expect(services.attachments()).toEqual([]);
-		expect(typeof services.http.add).toBe("function");
-		expect(typeof services.sockets.add).toBe("function");
-		expect(typeof services.pages.register).toBe("function");
+		// The services and nothing else: attach, detach and settle are the
+		// stage's, and a plugin calling them would undo the stage's work.
+		expect(Object.keys(services.http)).toEqual(["add"]);
+		expect(Object.keys(services.sockets)).toEqual(["add", "prepare"]);
+		expect(Object.keys(services.pages)).toEqual([
+			"register",
+			"command",
+			"refresh",
+			"pageId",
+		]);
 		expect(stage.disposed).toBe(false);
 	});
 
@@ -109,8 +116,28 @@ describe("createStage", () => {
 			["c1", "http://one.test"],
 			["c2", undefined],
 		]);
-		// What a plugin is given of a context: its id, its base URL, its jar.
-		expect(context().attachments()[0]?.cookies).toBe(first);
+		// What a plugin is given of a context: its id, its base URL, its jar --
+		// a frozen view that reads and adds cookies, and nothing else.
+		const [view] = context().attachments();
+		expect(view).toBe(stage.attachments[0]);
+		expect(Object.isFrozen(view)).toBe(true);
+		expect(Object.keys(view ?? {})).toEqual(["id", "baseURL", "cookies"]);
+		expect(view?.cookies).not.toBe(first);
+		expect(Object.keys(view?.cookies ?? {})).toEqual(["cookies", "addCookies"]);
+		first.cookieJar = [{ name: "sid", value: "s1" }];
+		await expect(view?.cookies.cookies()).resolves.toEqual([
+			{ name: "sid", value: "s1" },
+		]);
+		const added = {
+			name: "a",
+			value: "1",
+			domain: "one.test",
+			path: "/",
+			httpOnly: false,
+			secure: false,
+		};
+		await view?.cookies.addCookies?.([added]);
+		expect(first.addedCookies).toEqual([added]);
 		await expect(stage.attach(first)).rejects.toThrow(/already attached/);
 		await detachFirst();
 		await detachFirst();
@@ -247,6 +274,47 @@ describe("createStage: failures leave nothing behind", () => {
 		await expect(pages.attach(context)).resolves.toBeTypeOf("function");
 		await pages.dispose();
 		await stage.dispose();
+	});
+
+	it("finishes undoing an attach that is detached while it installs", async () => {
+		const { plugin, calls, context } = probe();
+		const stage = createStage({ plugins: [plugin] });
+		await context().http.add({
+			protocol: "http",
+			label: "rule",
+			url: "/api/**",
+			handle: () => ({ type: "fulfill" }),
+		});
+		const browser = createFakeContext();
+		const route = browser.route.bind(browser);
+		let entered = () => {};
+		const installing = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.spyOn(browser, "route").mockImplementation(async (url, handler) => {
+			entered();
+			await gate;
+			return route(url, handler);
+		});
+		const attaching = stage.attach(browser);
+		await installing;
+		// Disposed while the route is still going in...
+		const disposing = stage.dispose();
+		release();
+		await expect(attaching).rejects.toMatchObject({ code: "INVALID_STATE" });
+		await disposing;
+		// ...and nothing is left behind: before, the route went in after the
+		// detach, and a rule still answered after dispose().
+		expect(browser.routeCount).toBe(0);
+		expect(calls).toEqual([
+			"probe attach c1",
+			"probe detach c1",
+			"probe dispose",
+		]);
 	});
 
 	it("still reports a failed attach when undoing it fails too", async () => {

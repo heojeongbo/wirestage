@@ -125,6 +125,7 @@ const context: ContextPort = {
 	exposeBinding: async () => undefined,
 	pages: () => [],
 	cookies: async () => [],
+	addCookies: async () => undefined,
 	on: () => undefined,
 	off: () => undefined,
 };

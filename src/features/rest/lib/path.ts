@@ -1,4 +1,5 @@
 import { WirestageError } from "../../../shared/lib/errors/index.js";
+import { globSource } from "../../../shared/lib/match/index.js";
 import type { RestPath } from "../model/types.js";
 
 export interface PathMatcher {
@@ -6,13 +7,12 @@ export interface PathMatcher {
 	match(url: URL): Record<string, string> | undefined;
 }
 
-const SPECIAL = /[.+?^${}()|[\]\\]/g;
-
 /**
  * `/rooms/:id/files/*` against a URL's path, or — for a pattern that starts
- * with a scheme — against origin plus path. `*` is one segment and `**` any
- * number of them, as in every other pattern the library takes. The query
- * never takes part: a route for `/search` should answer `/search?q=x`.
+ * with a scheme — against origin plus path. The glob is the one every other
+ * pattern of the library takes (`*` one segment, `**` any number, none
+ * included, `{a,b}` either), plus `:name` params. The query never takes
+ * part: a route for `/search` should answer `/search?q=x`.
  */
 export function compilePath(
 	path: RestPath,
@@ -34,15 +34,7 @@ export function compilePath(
 		);
 	const full = joinBase(baseURL, path);
 	const absolute = /^[a-z][a-z\d+.-]*:\/\//i.test(full);
-	const keys: string[] = [];
-	const source = full
-		.replace(SPECIAL, (char) => `\\${char}`)
-		.replace(/\*\*|\*|:([A-Za-z_]\w*)/g, (token, key: string | undefined) => {
-			if (token === "**") return ".*";
-			if (key === undefined) return "[^/]*";
-			keys.push(key);
-			return "([^/]+)";
-		});
+	const { source, params: keys } = globSource(full, { params: true });
 	const pattern = new RegExp(`^${source}/?$`);
 	return {
 		match(url) {

@@ -25,7 +25,8 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 		scope: "Rest",
 		setup(context) {
 			const { name } = context;
-			let recording = false;
+			/** The record rule being added, once: every context gets it. */
+			let recording: Promise<unknown> | undefined;
 
 			const toOutcome = async (reply: RestReply): Promise<HttpOutcome> => {
 				switch (reply.kind) {
@@ -143,23 +144,24 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 			return {
 				api,
 				async attach() {
-					if (
-						recording ||
-						options.record === undefined ||
-						options.record === false
-					)
-						return;
-					recording = true;
+					if (options.record === undefined || options.record === false) return;
 					const base = compilePath(`${options.baseURL ?? ""}/**`, undefined);
-					await context.http.add({
-						protocol: name,
-						label: "record",
-						url:
-							options.record === true
-								? (url) => base.match(url) !== undefined
-								: options.record,
-						handle: () => ({ type: "fallback" }),
-					});
+					recording ??= context.http
+						.add({
+							protocol: name,
+							label: "record",
+							url:
+								options.record === true
+									? (url) => base.match(url) !== undefined
+									: options.record,
+							handle: () => ({ type: "fallback" }),
+						})
+						.catch((error: unknown) => {
+							// The router took the rule back: the next attach adds it again.
+							recording = undefined;
+							throw error;
+						});
+					await recording;
 				},
 			};
 		},

@@ -37,7 +37,26 @@ const SPECIAL = /[.*+?^${}()|[\]\\/]/;
 
 /** Translate a glob into an anchored RegExp. */
 export function globToRegExp(glob: string): RegExp {
-	let source = "^";
+	return new RegExp(`^${globSource(glob).source}$`);
+}
+
+/** A glob as RegExp source (unanchored), and the params it captures, in order. */
+export interface GlobSource {
+	readonly source: string;
+	readonly params: readonly string[];
+}
+
+/**
+ * The RegExp source of a glob. With `params`, a `:name` (a letter or `_`,
+ * then word characters) matches one segment and captures it: the routes of a
+ * REST plugin, in the same glob language as every other pattern.
+ */
+export function globSource(
+	glob: string,
+	options: { readonly params?: boolean } = {},
+): GlobSource {
+	const params: string[] = [];
+	let source = "";
 	let inGroup = false;
 	for (let i = 0; i < glob.length; i++) {
 		const char = glob.charAt(i);
@@ -62,6 +81,15 @@ export function globToRegExp(glob: string): RegExp {
 			source += ")";
 		} else if (char === "," && inGroup) {
 			source += "|";
+		} else if (char === ":" && options.params) {
+			// `:8080` in an origin is not a param: a name starts with a letter.
+			const name = /^[A-Za-z_]\w*/.exec(glob.slice(i + 1))?.[0];
+			if (name === undefined) source += char;
+			else {
+				params.push(name);
+				source += "([^/]+)";
+				i += name.length;
+			}
 		} else {
 			source += escapeChar(char);
 		}
@@ -71,7 +99,7 @@ export function globToRegExp(glob: string): RegExp {
 			"INVALID_ARGUMENT",
 			`glob "${glob}" opens a "{" it never closes; write a literal brace as "\\{"`,
 		);
-	return new RegExp(`${source}$`);
+	return { source, params };
 }
 
 function escapeChar(char: string): string {

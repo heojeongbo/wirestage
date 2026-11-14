@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import type { ServerHttp2Session } from "node:http2";
 import type { AddressInfo } from "node:net";
 
 import { create, toBinary } from "@bufbuild/protobuf";
@@ -79,6 +80,11 @@ async function setup(
 	extra: {
 		clock?: ReturnType<typeof createManualClock>;
 		network?: string;
+		/** Runs before the stage is attached, for a test of attaching itself. */
+		beforeAttach?: (
+			attach: () => Promise<unknown>,
+			context: FakeContext,
+		) => Promise<void>;
 	} = {},
 ) {
 	const stage = createStage({
@@ -87,7 +93,9 @@ async function setup(
 	});
 	cleanups.push(() => stage.dispose());
 	const context = createFakeContext();
-	await stage.attach(context, { baseURL: "http://app.test" });
+	const attach = () => stage.attach(context, { baseURL: "http://app.test" });
+	await extra.beforeAttach?.(attach, context);
+	await attach();
 	const page = context.newPage();
 	const networkBase = extra.network ?? (await backend(REAL));
 	const network = async (request: Request) => {
@@ -706,6 +714,23 @@ describe("holds", () => {
 });
 
 describe("recording real traffic", () => {
+	it("records from the next attach when the first one failed", async () => {
+		const { stage, web } = await setup(
+			{ baseURL: "/api", record: [EchoService] },
+			{
+				async beforeAttach(attach, context) {
+					vi.spyOn(context, "route").mockRejectedValueOnce(
+						new Error("context closed"),
+					);
+					await expect(attach()).rejects.toThrow("context closed");
+				},
+			},
+		);
+		await web.say({ text: "after a retry" });
+		const [call] = await stage.connect.calls(EchoService.method.say);
+		expect(call?.request?.text).toBe("after a retry");
+	});
+
 	it("decodes requests, responses and statuses that pass through", async () => {
 		const { stage, web, connectClient } = await setup({
 			baseURL: "/api",
@@ -831,6 +856,40 @@ describe("recording real traffic", () => {
 });
 
 describe("drive clients and served fakes", () => {
+	it("closes a drive client's HTTP/2 connection with the stage", async () => {
+		const server = (await import("node:http2")).createServer(
+			connectNodeAdapter({
+				routes: (router) => router.service(EchoService, REAL),
+			}),
+		);
+		const sessions: ServerHttp2Session[] = [];
+		server.on("session", (session) => sessions.push(session));
+		await new Promise<void>((resolve) =>
+			server.listen(0, "127.0.0.1", resolve),
+		);
+		cleanups.push(
+			() => new Promise<void>((resolve) => server.close(() => resolve())),
+		);
+		const stage = createStage({ plugins: [connect()] });
+		cleanups.push(() => stage.dispose());
+		const client = stage.connect.client(EchoService, {
+			baseURL: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+			protocol: "grpc",
+			session: null,
+		});
+		await expect(client.say({ text: "x" })).resolves.toMatchObject({
+			text: "real x",
+		});
+		const [session] = sessions;
+		const closed = new Promise<void>((resolve) =>
+			session?.once("close", () => resolve()),
+		);
+		// connect-node keeps an idle connection for 15 minutes, and the
+		// server's close() above waits for it: on Node 22 it never returned.
+		await stage.dispose();
+		await closed;
+	});
+
 	it("calls the real backend as the page, over every protocol", async () => {
 		const http1 = await backend(REAL);
 		const http2 = await backend(REAL, true);

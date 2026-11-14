@@ -11,5 +11,11 @@ export function named<const Name extends string, Api>(
 	name: Name,
 	plugin: WirePlugin<string, Api>,
 ): WirePlugin<Name, Api> {
-	return { ...plugin, name };
+	return {
+		name,
+		scope: plugin.scope,
+		// Called on the plugin, not copied off it: a plugin written as a class
+		// has `setup` on its prototype, which a spread leaves behind.
+		setup: (context) => plugin.setup(context),
+	};
 }

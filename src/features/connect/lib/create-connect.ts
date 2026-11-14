@@ -1,5 +1,6 @@
 import type { DescService } from "@bufbuild/protobuf";
 import { type Client, createClient } from "@connectrpc/connect";
+import type { Http2SessionManager } from "@connectrpc/connect-node";
 
 import {
 	definePlugin,
@@ -53,7 +54,10 @@ function createConnect(context: PluginContext, options: ConnectOptions) {
 	const servers = new Set<RpcServer>();
 	/** Lets go of each call a hold still has, when the stage goes away. */
 	const heldCalls = new Set<() => void>();
-	let recordedOnAttach = false;
+	/** The drive clients' HTTP/2 connections, closed with the stage. */
+	const connections = new Set<Http2SessionManager>();
+	/** The record rules being added, once: every context gets them. */
+	let recording: Promise<unknown> | undefined;
 
 	const api: ConnectApi = {
 		service: (service, impl, stubOptions = {}) =>
@@ -110,6 +114,7 @@ function createConnect(context: PluginContext, options: ConnectOptions) {
 						now: () => context.clock.now(),
 						recorder,
 						correlation: testCorrelation,
+						onConnection: (connection) => connections.add(connection),
 					},
 				),
 			);
@@ -135,12 +140,24 @@ function createConnect(context: PluginContext, options: ConnectOptions) {
 	return {
 		api,
 		async attach() {
-			if (recordedOnAttach || options.record === undefined) return;
-			recordedOnAttach = true;
-			for (const service of options.record) await api.record(service);
+			const services = options.record;
+			if (services === undefined) return;
+			recording ??= (async () => {
+				for (const service of services) await api.record(service);
+			})().catch((error: unknown) => {
+				// Only the first rule can fail, installing the context's route, and
+				// the router takes it back: the next attach starts over.
+				recording = undefined;
+				throw error;
+			});
+			await recording;
 		},
 		async dispose() {
 			for (const letGo of [...heldCalls]) letGo();
+			// A drive client's connection outlives its calls; left open, a
+			// server in the test's own process would wait for it on close.
+			for (const connection of connections) connection.abort();
+			connections.clear();
 			await Promise.all([...servers].map((server) => server.close()));
 		},
 	};

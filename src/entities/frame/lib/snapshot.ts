@@ -63,7 +63,9 @@ export function formatFrames(
 	options: { readonly limit?: number } = {},
 ): string {
 	const limit = options.limit ?? 200;
-	const shown = frames.length > limit ? frames.slice(-limit) : frames;
+	// Not `slice(-limit)`: a limit of 0 would be `slice(-0)`, every frame.
+	const shown =
+		frames.length > limit ? frames.slice(frames.length - limit) : frames;
 	const origin = shown[0]?.at ?? 0;
 	const lines = shown.map((frame) => {
 		const size = frame.payload.empty
@@ -85,15 +87,18 @@ export function formatFrames(
 function jsonSafe(
 	meta: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-	const seen = new WeakSet<object>();
+	// The objects on the path from the root to the value being written. Only
+	// those make a cycle: an object met again elsewhere is merely shared.
+	const ancestors: object[] = [];
 	return JSON.parse(
-		JSON.stringify(meta, (_key, value: unknown) => {
+		JSON.stringify(meta, function (this: unknown, _key, value: unknown) {
 			if (typeof value === "bigint") return value.toString();
 			if (value instanceof Uint8Array) return toBase64(value);
-			if (typeof value === "object" && value !== null) {
-				if (seen.has(value)) return "[circular]";
-				seen.add(value);
-			}
+			if (typeof value !== "object" || value === null) return value;
+			// `this` holds `value`: whatever was above it is finished.
+			while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop();
+			if (ancestors.includes(value)) return "[circular]";
+			ancestors.push(value);
 			return value;
 		}),
 	) as Record<string, unknown>;

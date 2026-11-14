@@ -113,6 +113,8 @@ export interface CookieJarPort {
 }
 
 export interface ContextPort extends CookieJarPort {
+	/** Required here: a context always has it, and a plugin's jar calls it. */
+	addCookies(cookies: CookieInit[]): Promise<void>;
 	route(url: UrlPredicate, handler: RouteHandler): Promise<unknown>;
 	unroute(url: UrlPredicate, handler?: RouteHandler): Promise<void>;
 	routeWebSocket(

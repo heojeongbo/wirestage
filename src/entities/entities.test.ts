@@ -8,7 +8,7 @@ import {
 	type Frame,
 	type FrameInit,
 } from "./frame/index.js";
-import { definePlugin } from "./plugin/index.js";
+import { definePlugin, named, type PluginRuntime } from "./plugin/index.js";
 
 const frame = (over: Partial<FrameInit> = {}): FrameInit => ({
 	protocol: "rest",
@@ -259,6 +259,13 @@ describe("timeline", () => {
 			},
 		});
 		expect(second).not.toHaveProperty("truncated");
+		// One object in two places is shared, not circular.
+		const shared = { id: 1 };
+		timeline.append(frame({ meta: { a: shared, b: [shared, shared] } }));
+		expect(timeline.snapshot().frames[2]?.meta).toEqual({
+			a: { id: 1 },
+			b: [{ id: 1 }, { id: 1 }],
+		});
 		expect(second).not.toHaveProperty("meta");
 		expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
 		expect(timeline.snapshot({ kind: "marker" }).frames).toEqual([]);
@@ -290,6 +297,30 @@ describe("timeline", () => {
 			"… 1 earlier frames not shown\n#2  +0.0ms  rest  out message  /a  4B",
 		);
 		expect(createTimeline({ clock }).format()).toBe("");
+		// No frames, not all of them.
+		expect(timeline.format(undefined, { limit: 0 })).toBe(
+			"… 2 earlier frames not shown",
+		);
+	});
+});
+
+describe("named", () => {
+	it("renames a plugin written as a class, keeping its methods and state", () => {
+		class Counter {
+			readonly name = "counter";
+			readonly scope = "Count";
+			#count = 41;
+			setup(): PluginRuntime<{ next(): number }> {
+				return { api: { next: () => ++this.#count } };
+			}
+		}
+		const renamed = named("tally", new Counter());
+		expect(renamed).toMatchObject({ name: "tally", scope: "Count" });
+		// A spread copies own properties only: `setup` lives on the prototype.
+		const { api } = renamed.setup(
+			{} as Parameters<(typeof renamed)["setup"]>[0],
+		);
+		expect(api.next()).toBe(42);
 	});
 });
 

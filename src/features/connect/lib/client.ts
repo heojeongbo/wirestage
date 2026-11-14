@@ -10,6 +10,7 @@ import {
 	createConnectTransport,
 	createGrpcTransport,
 	createGrpcWebTransport,
+	Http2SessionManager,
 } from "@connectrpc/connect-node";
 
 import type { CookieJarPort } from "../../../shared/api/playwright/index.js";
@@ -24,6 +25,12 @@ export interface ClientDeps {
 	readonly now?: () => number;
 	readonly recorder?: Recorder;
 	readonly correlation?: () => string;
+	/**
+	 * Handed the HTTP/2 connection a gRPC client opens, so its owner can close
+	 * it. connect-node keeps an idle one for 15 minutes, and a server in the
+	 * same process cannot finish closing while it is open (Node 22 waits).
+	 */
+	readonly onConnection?: (connection: Http2SessionManager) => void;
 }
 
 /** Sent with every call that did not set the header itself. */
@@ -151,24 +158,39 @@ export function createTransport(
 		interceptors.push(
 			recordingInterceptor(deps.recorder, deps.correlation, protocol),
 		);
+	const nodeOptions = options.ignoreHttpsErrors
+		? { rejectUnauthorized: false }
+		: undefined;
 	const common = {
 		baseUrl: options.baseURL,
 		interceptors,
 		useBinaryFormat: options.binary ?? true,
-		...(options.ignoreHttpsErrors
-			? { nodeOptions: { rejectUnauthorized: false } }
-			: {}),
 	};
-	if (protocol === "grpc") return createGrpcTransport(common);
-	if (protocol === "grpc-web")
-		return createGrpcWebTransport({ ...common, httpVersion: "1.1" });
-	return createConnectTransport({ ...common, httpVersion: "1.1" });
+	if (protocol === "grpc") {
+		// The transport's own session manager would be out of reach; this one
+		// is handed to whoever has to close it.
+		const sessionManager = new Http2SessionManager(
+			options.baseURL,
+			undefined,
+			nodeOptions,
+		);
+		deps.onConnection?.(sessionManager);
+		return createGrpcTransport({ ...common, sessionManager });
+	}
+	const http1 = { ...common, httpVersion: "1.1" as const, nodeOptions };
+	if (protocol === "grpc-web") return createGrpcWebTransport(http1);
+	return createConnectTransport(http1);
 }
 
 /**
  * A typed client for a real backend, outside any stage: the `rpc` helper an
  * e2e suite otherwise writes by hand — framing, status parsing and all — per
  * protocol. Errors arrive as `ConnectError` with the server's code.
+ *
+ * Over gRPC it holds an HTTP/2 connection, which connect-node keeps for 15
+ * minutes once idle. It does not keep the process alive, but a server in the
+ * same process waits for it before it finishes closing. A stage's client is
+ * closed with the stage.
  */
 export function createRpcClient<S extends DescService>(
 	service: S,

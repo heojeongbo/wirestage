@@ -258,6 +258,38 @@ describe("architecture boundaries", () => {
 				"(rule 13)",
 			],
 			[
+				"a file that is not TypeScript",
+				"shared/lib/bytes/extra.js",
+				`export const x = 1;`,
+				"TypeScript only (rule S1)",
+			],
+			[
+				// Read like any other module: one the checker skipped was a hole.
+				"a rule broken in an .mts module",
+				"features/rest/lib/unseen.mts",
+				`import { chromium } from "playwright";`,
+				"only by app/playwright (rule 8)",
+			],
+			[
+				"a Node module loaded through getBuiltinModule",
+				"features/rest/lib/rest.ts",
+				`export const http = process.getBuiltinModule("node:http");`,
+				"(rule 11)",
+			],
+			[
+				"an entrypoint with code of its own",
+				"rest.ts",
+				`export * from "./features/rest/index.js";\nexport const version = 1;`,
+				"export … from statements only (rule 7)",
+			],
+			[
+				// The port would reach a feature under another unit's name.
+				"a unit handing on another unit's API",
+				"shared/api/server/index.ts",
+				`export { listen } from "./listen.js";\nexport type { PagePort } from "../playwright/index.js";`,
+				"re-exports only its own modules (rule 3)",
+			],
+			[
 				"a computed specifier",
 				"shared/api/server/listen.ts",
 				`export const load = (name: string) => import(name);`,

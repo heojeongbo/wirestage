@@ -94,6 +94,16 @@ describe("path patterns", () => {
 		).toBeUndefined();
 	});
 
+	it("speaks the library's one glob language, params included", () => {
+		const anyDepth = compilePath("/a/**/b", undefined);
+		// `**/` may be no directory at all, as in every URL pattern.
+		expect(anyDepth.match(url("http://h/a/b"))).toEqual({});
+		expect(anyDepth.match(url("http://h/a/x/y/b"))).toEqual({});
+		const versions = compilePath("/v{1,2}/items/:id", undefined);
+		expect(versions.match(url("http://h/v2/items/7"))).toEqual({ id: "7" });
+		expect(versions.match(url("http://h/v3/items/7"))).toBeUndefined();
+	});
+
 	it("joins a base path, and matches absolute patterns with the origin", () => {
 		expect(
 			compilePath("items", "/api/v1/").match(url("http://h/api/v1/items")),
@@ -336,6 +346,20 @@ describe("rest plugin", () => {
 			"https://billing.test/invoices",
 		]);
 		expect((await stage.frames({ protocol: "billing" })).length).toBe(2);
+	});
+
+	it("records from the next attach when the first one failed", async () => {
+		const stage = createStage({ plugins: [rest({ record: true })] });
+		stages.push(stage);
+		const context = createFakeContext();
+		vi.spyOn(context, "route").mockRejectedValueOnce(
+			new Error("context closed"),
+		);
+		await expect(stage.attach(context)).rejects.toThrow("context closed");
+		// "A failed attach is undone, so it can be tried again": recording too.
+		await stage.attach(context);
+		await context.dispatch("http://h/anything");
+		expect((await stage.rest.calls()).length).toBe(1);
 	});
 
 	it("records with a custom matcher, and not at all when told no", async () => {
