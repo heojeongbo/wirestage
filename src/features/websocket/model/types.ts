@@ -90,7 +90,11 @@ export interface WsMock {
 export interface WsProxyOptions {
 	/** Proxy this many connections, then leave the rest to the next rule. */
 	readonly times?: number;
-	/** Drop a message instead of forwarding it. Dropped messages are recorded as faults. */
+	/**
+	 * Drop a message instead of forwarding it. Dropped messages are recorded
+	 * as faults. If it throws, the stage closes both ends, the page's with
+	 * 1011, and records a `rule-error` fault.
+	 */
 	readonly drop?: (message: WsMessage) => boolean;
 }
 

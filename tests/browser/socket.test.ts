@@ -209,6 +209,43 @@ describe("socket rules in Chromium", () => {
 			.toEqual(["open", `close 1011 ${reason}`]);
 	});
 
+	it("fails a proxy whose drop throws, instead of throwing into Playwright", async () => {
+		const server = await realServer();
+		const { stage, page } = await staged([websocket()]);
+		const pattern = `${server.url}/**`;
+		const proxy = await stage.websocket.proxy(pattern, {
+			drop: () => {
+				throw new Error("bug in drop");
+			},
+		});
+		// The page greets on open: the first message, and the first call.
+		await openSocket(page, `${server.url}/live`);
+		const connection = await proxy.next({ timeout: 10_000 });
+		const real = await server.next();
+		const reason = `wirestage: rule "proxy ${pattern}" failed: bug in drop`;
+		// Called from Playwright's own event dispatch, the throw would be an
+		// uncaught exception, and the socket would stay open.
+		await expect(real.closed).resolves.toEqual({ code: 1000, reason });
+		await expect
+			.poll(async () => (await pageSocket(page)).events)
+			.toEqual(["open", `close 1011 ${reason}`]);
+		// Its close frame is written as it closes, whichever end reports first.
+		await connection.closed;
+		const frames = await stage.websocket.frames();
+		expect(
+			frames.map((frame) => [
+				frame.kind,
+				frame.source,
+				frame.meta["event"] ?? frame.meta["reason"],
+			]),
+		).toEqual([
+			["lifecycle", "page", "open"],
+			["fault", "stub", "rule-error"],
+			["lifecycle", "stub", "close"],
+		]);
+		expect(real.received).toEqual([]);
+	});
+
 	it("passes no message on for a rule that only connects, but passes closes on", async () => {
 		const server = await realServer();
 		const { stage, page } = await staged([

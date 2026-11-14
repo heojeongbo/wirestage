@@ -337,6 +337,34 @@ describe("websocket proxy", () => {
 		]);
 	});
 
+	it("closes the connection when drop throws, and says the stub closed it", async () => {
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		const { stage, open } = await setup();
+		const proxy = await stage.websocket.proxy("/feed", {
+			drop: () => {
+				throw new Error("bug in drop");
+			},
+		});
+		const page = await open("/feed");
+		const connection = await proxy.next();
+		// Called from Playwright's own event dispatch: thrown there, it
+		// would be an uncaught exception in the test process.
+		expect(() => page.receive("first")).not.toThrow();
+		const reason = 'wirestage: rule "proxy /feed" failed: bug in drop';
+		expect(page.closedWith).toEqual([{ code: 1011, reason }]);
+		expect(page.server?.closedWith).toEqual([{ code: 1000, reason }]);
+		await expect(connection.closed).resolves.toEqual({ code: 1011, reason });
+		expect(shape(await stage.websocket.frames())).toEqual([
+			"lifecycle none page open",
+			"fault none stub rule-error",
+			"lifecycle none stub close",
+		]);
+		expect(() => connection.toServer("late")).toThrow(
+			expect.objectContaining({ code: "CLOSED" }),
+		);
+		expect(logged).toHaveBeenCalled();
+	});
+
 	it("refuses to inject once the connection is over, from either end", async () => {
 		const { stage, open } = await setup();
 		const proxy = await stage.websocket.proxy("/feed");

@@ -49,6 +49,9 @@ export async function createProxy(
 				label: `message on ${socket.url.pathname}`,
 			});
 			const closed = createDeferred<WsCloseInfo>();
+			// Who closed, when neither end did: the test, or the stub — the
+			// stage closes the socket of a rule that throws.
+			let closedBy: "test" | "stub" | undefined;
 			log("lifecycle", "none", "page", { event: "open", url: socket.url.href });
 			const forward = (
 				direction: "in" | "out",
@@ -57,7 +60,16 @@ export async function createProxy(
 			) => {
 				const passing = toMessage(direction, raw, context.clock.now());
 				messages.push(passing);
-				if (options.drop?.(passing)) {
+				let dropped: boolean | undefined;
+				try {
+					dropped = options.drop?.(passing);
+				} catch (error) {
+					// The stage fails a rule that throws and closes both ends: the
+					// closes they report are the stub's, not the page's or server's.
+					closedBy ??= "stub";
+					throw error;
+				}
+				if (dropped) {
 					log("fault", direction, "stub", { reason: "dropped" }, raw);
 					return;
 				}
@@ -77,7 +89,6 @@ export async function createProxy(
 			// end to pass the close on, and the end that started it to complete
 			// it — the page's socket hangs in CLOSING until its end is closed.
 			// Once: each of those closes is reported back through a handler.
-			let closedBy: "test" | undefined;
 			const relay =
 				(from: "page" | "network") =>
 				(code: number | undefined, reason: string | undefined) => {
@@ -97,7 +108,8 @@ export async function createProxy(
 				};
 			page.onClose(relay("page"));
 			server.onClose(relay("network"));
-			// Over from the moment the test closes it, before either end hears.
+			// Over from the moment the test closes it or the rule fails, before
+			// either end hears.
 			const over = () => closed.settled || closedBy !== undefined;
 			connections.push({
 				url: socket.url.href,

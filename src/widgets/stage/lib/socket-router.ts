@@ -108,24 +108,44 @@ export function createSocketRouter(deps: SocketRouterDeps): SocketRouterEngine {
 		entries.splice(entries.indexOf(entry), 1);
 	};
 
+	/**
+	 * One end, as a rule drives it. Playwright calls the rule's handlers from
+	 * its own event dispatch, where a throw is an uncaught exception and a
+	 * rejection an unhandled one — either surfacing in whichever test runs
+	 * next. A handler that fails fails the rule instead, as `open` does.
+	 */
 	const peer = (
 		route: WebSocketRoutePort,
+		onFailure: (error: unknown) => Promise<void>,
 		close: (options: CloseOptions) => CloseOptions = (options) => options,
-	): SocketPeer => ({
-		send: (data) =>
-			route.send(typeof data === "string" ? data : toBuffer(data)),
-		close: (options) => route.close(close(options)),
-		onMessage: (handler) => route.onMessage(handler),
-		onClose: (handler) => route.onClose(handler),
-	});
+	): SocketPeer => {
+		const guarded =
+			<Args extends unknown[]>(handler: (...args: Args) => void) =>
+			(...args: Args): void => {
+				try {
+					// Typed `void`, yet an async function is a valid handler.
+					const result: unknown = handler(...args);
+					if (result instanceof Promise) result.catch(onFailure);
+				} catch (error) {
+					void onFailure(error);
+				}
+			};
+		return {
+			send: (data) =>
+				route.send(typeof data === "string" ? data : toBuffer(data)),
+			close: (options) => route.close(close(options)),
+			onMessage: (handler) => route.onMessage(guarded(handler)),
+			onClose: (handler) => route.onClose(guarded(handler)),
+		};
+	};
 
 	/**
-	 * A rule that throws is a bug in the test. Say which rule failed — in the
-	 * log, on the timeline, and in the reason the page's socket closes with —
-	 * and close both ends: the page's socket would otherwise sit open with
-	 * nobody answering it, and a server the rule connected would stay
-	 * connected. 1011 is a server's "internal error"; the server's end gets
-	 * 1000, as a script may not send 1011.
+	 * A rule that throws, in `open` or in a handler it set, is a bug in the
+	 * test. Say which rule failed — in the log, on the timeline, and in the
+	 * reason the page's socket closes with — and close both ends: the page's
+	 * socket would otherwise sit open with nobody answering it, and a server
+	 * the rule connected would stay connected. 1011 is a server's "internal
+	 * error"; the server's end gets 1000, as a script may not send 1011.
 	 */
 	const fail = async (
 		rule: SocketRule,
@@ -178,16 +198,25 @@ export function createSocketRouter(deps: SocketRouterDeps): SocketRouterEngine {
 		// the rule's own replaces.
 		route.onMessage(drop);
 		let server: SocketPeer | undefined;
+		let failed = false;
+		// Once per socket, for whatever fails first. Marked before failing:
+		// the closes that follow are reported to the rule's handlers, and a
+		// broken one throws again.
+		const failOnce = async (error: unknown): Promise<void> => {
+			if (failed) return;
+			failed = true;
+			await fail(entry.rule, view, server, error);
+		};
 		const view: SocketView = {
 			correlation: deps.correlation(),
 			url,
 			context: attachment.id,
-			page: peer(route),
+			page: peer(route, failOnce),
 			connectToServer: () => {
 				if (server === undefined) {
 					const upstream = route.connectToServer();
 					upstream.onMessage(drop);
-					server = peer(upstream, forServer);
+					server = peer(upstream, failOnce, forServer);
 				}
 				return server;
 			},
@@ -200,7 +229,7 @@ export function createSocketRouter(deps: SocketRouterDeps): SocketRouterEngine {
 		} catch (error) {
 			// Never rejected to Playwright, where it would surface as an
 			// unhandled rejection in whichever test runs next.
-			await fail(entry.rule, view, server, error);
+			await failOnce(error);
 		}
 	};
 

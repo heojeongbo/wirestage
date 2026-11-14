@@ -19,6 +19,8 @@ export interface SocketPeer {
 	/**
 	 * Messages this end sends. One handler; a later call replaces it. Until
 	 * one is set, what this end sends is dropped, not passed on to the other.
+	 * A handler that throws, or rejects, fails the rule (see
+	 * `SocketRule.open`).
 	 */
 	onMessage(handler: (data: string | Uint8Array) => void): void;
 	/**
@@ -26,7 +28,8 @@ export interface SocketPeer {
 	 * the page starts is reported again once `close()` completes it, so a
 	 * handler must expect to run twice. Setting one turns off the automatic
 	 * forwarding of a close to the other end: the page's socket then hangs in
-	 * CLOSING until the handler closes the page's end itself.
+	 * CLOSING until the handler closes the page's end itself. A handler that
+	 * throws, or rejects, fails the rule.
 	 */
 	onClose(
 		handler: (code: number | undefined, reason: string | undefined) => void,
@@ -70,12 +73,14 @@ export interface SocketRule {
 	 * the handlers before awaiting anything: an end drops what it sends
 	 * until it has one.
 	 *
-	 * A rule that throws, or rejects, is a bug in the test: the stage logs
-	 * it, records a `fault` frame (`meta.reason` `rule-error`, `meta.rule`
-	 * the label, `meta.error` the message) and closes the page's end with
-	 * 1011 and a reason naming the rule — and the server's end too, if the
-	 * rule connected it. The ends' `onClose` handlers hear those closes as
-	 * they hear any other.
+	 * A rule that throws, or rejects — here, or in a handler it set on
+	 * either end — is a bug in the test: the stage logs it, records a
+	 * `fault` frame (`meta.reason` `rule-error`, `meta.rule` the label,
+	 * `meta.error` the message) and closes the page's end with 1011 and a
+	 * reason naming the rule — and the server's end too, if the rule
+	 * connected it. Once per socket: what fails after that is not reported
+	 * again. The ends' `onClose` handlers hear those closes as they hear any
+	 * other.
 	 */
 	open(socket: SocketView): void | Promise<void>;
 }

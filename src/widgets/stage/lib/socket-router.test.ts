@@ -8,6 +8,7 @@ import {
 } from "../../../__fixtures__/fake-playwright.js";
 import { createTimeline } from "../../../entities/frame/index.js";
 import type { SocketRule, SocketView } from "../../../entities/plugin/index.js";
+import { createDeferred } from "../../../shared/lib/async/index.js";
 import { createManualClock } from "../../../shared/lib/clock/index.js";
 import { createSequence } from "../../../shared/lib/id/index.js";
 import { createScopedLogger } from "../../../shared/lib/logger/index.js";
@@ -377,6 +378,61 @@ describe("socket router", () => {
 			{ code: 1011, reason: `wirestage: rule "a${"é".repeat(52)}` },
 		]);
 		expect(timeline.last()?.meta).toMatchObject({ error: "not an Error" });
+	});
+
+	it("fails a rule whose handler throws or rejects, instead of throwing into Playwright", async () => {
+		const { router, context, attachment, log, timeline } = setup();
+		await router.attach(attachment);
+		vi.spyOn(log, "error").mockImplementation(() => {});
+		const { rule, sockets } = recorder({ label: "broken" });
+		await router.add(rule);
+		const reason = (message: string) =>
+			`wirestage: rule "broken" failed: ${message}`;
+
+		// Playwright calls a handler from its own event dispatch, where a
+		// throw is an uncaught exception in the test process.
+		const first = (await open(context)) as FakeWebSocketRoute;
+		const one = sockets.at(-1) as SocketView;
+		one.connectToServer();
+		one.page.onMessage(() => {
+			throw new Error("bug in a handler");
+		});
+		expect(() => first.receive("hello")).not.toThrow();
+		expect(first.closedWith).toEqual([
+			{ code: 1011, reason: reason("bug in a handler") },
+		]);
+		expect(first.server?.closedWith).toEqual([
+			{ code: 1000, reason: reason("bug in a handler") },
+		]);
+		// Once per socket: a message still on its way fails it no further.
+		first.receive("again");
+		expect(first.closedWith).toHaveLength(1);
+		expect(timeline.frames().map((frame) => frame.meta)).toEqual([
+			{ reason: "rule-error", rule: "broken", error: "bug in a handler" },
+		]);
+
+		// A close handler, on the server's end: it hears the stage's closes
+		// as well, and throws on each.
+		const second = (await open(context)) as FakeWebSocketRoute;
+		(sockets.at(-1) as SocketView).connectToServer().onClose(() => {
+			throw new Error("bug in a close handler");
+		});
+		expect(() => second.server?.closeFromPeer(4000, "bye")).not.toThrow();
+		expect(second.closedWith).toEqual([
+			{ code: 1011, reason: reason("bug in a close handler") },
+		]);
+
+		// An async handler: its rejection would go unhandled.
+		const third = (await open(context)) as FakeWebSocketRoute;
+		const rejecting = createDeferred<void>();
+		(sockets.at(-1) as SocketView).page.onMessage(() => rejecting.promise);
+		third.receive("hello");
+		rejecting.reject(new Error("bug in an async handler"));
+		await rejecting.promise.catch(() => {});
+		expect(third.closedWith).toEqual([
+			{ code: 1011, reason: reason("bug in an async handler") },
+		]);
+		expect(timeline.frames()).toHaveLength(3);
 	});
 
 	it("treats a URL matcher that throws as no match, for that rule alone", async () => {
