@@ -59,6 +59,15 @@ function responderOf(response: ServerResponse): ServedResponse {
 					name,
 					value.includes("\n") ? value.split("\n") : value,
 				);
+			// Said, not left to Node: Node drops a HEAD response's body and its
+			// length with it, and a client sizes what it would download by it.
+			// A 204 or 304 carries none.
+			if (
+				status !== 204 &&
+				status !== 304 &&
+				!response.hasHeader("content-length")
+			)
+				response.setHeader("content-length", Buffer.byteLength(body));
 			response.statusCode = status;
 			return new Promise<void>((resolve) => {
 				// `close` too: a client that went away never sees `finish`.

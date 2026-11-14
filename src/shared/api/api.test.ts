@@ -117,6 +117,28 @@ describe("serveHttp", () => {
 		]);
 	});
 
+	it("tells a HEAD request the length it would download, and a 204 none", async () => {
+		const server = await serveHttp({ name: "fake" }, (request, response) =>
+			request.url.pathname === "/nothing"
+				? response.send(204, {}, "")
+				: response.send(200, { "content-type": "text/plain" }, "eleven char"),
+		);
+		servers.push(server);
+		const head = await fetch(`${server.url}/manifest`, { method: "HEAD" });
+		expect(head.headers.get("content-length")).toBe("11");
+		expect(await head.text()).toBe("");
+		const nothing = await fetch(`${server.url}/nothing`);
+		expect(nothing.status).toBe(204);
+		expect(nothing.headers.get("content-length")).toBeNull();
+		const explicit = await serveHttp({ name: "fake" }, (_request, response) =>
+			response.send(200, { "content-length": "3" }, "abc"),
+		);
+		servers.push(explicit);
+		expect(
+			(await fetch(`${explicit.url}/`)).headers.get("content-length"),
+		).toBe("3");
+	});
+
 	it("drops the connection on reset, as a network failure would", async () => {
 		const server = await serveHttp({ name: "fake" }, (_request, response) =>
 			response.reset(),
