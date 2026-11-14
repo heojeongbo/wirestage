@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (2026-11-14)
+
+- `stage.cursor(filter)`: a reading position of its own, for a helper that
+  keeps a log per page or per channel; `take()` and `peek()` bring the timeline
+  up to date first, and neither moves `drain` or another cursor.
+- `stage.mark(name, { page, meta })`: a marker can carry the page it is about,
+  so a read narrowed to that page includes it.
+- **Breaking:** `mark`'s second argument is an options object. Write
+  `mark(name, { meta })` where you wrote `mark(name, meta)`.
+
 ## 0.1.1 (2026-11-14)
 
 Fixes from the review of 0.1.0.
