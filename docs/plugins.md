@@ -91,9 +91,15 @@ The router guarantees the rest, so a plugin does not have to:
 - `onPassthroughResponse` and `onPassthroughFailure` report what the network
   did with a request the rule passed on — not what another rule answered.
 - A rule that throws answers 500 with its `label` and is logged; nothing is
-  left hanging and nothing rejects into Playwright. A `url` predicate that
-  throws counts as no match for that rule, and is logged: the predicate runs
-  for every request of the context, and one bug must not take them all.
+  left hanging and nothing rejects into Playwright. So does an answer the
+  browser would refuse, checked before the route is touched: a `continue` to
+  another scheme, an unknown abort code, a header with a line break or an
+  invalid name. A `url` predicate that throws counts as no match for that rule,
+  and is logged: the predicate runs for every request of the context, and one
+  bug must not take them all.
+- A `continue` URL may be relative: it is resolved against the request. Only
+  `set-cookie` carries several values separated by newlines; another header's
+  values are folded with `, `.
 
 A response that stays open is a `ResponseStream`: set the head, write chunks
 at the test's pace, then `end()` or `cut()`.
@@ -125,6 +131,14 @@ export const ndjson = definePlugin({
 });
 ```
 
+`head()` holds the status and headers back until the first `write` or
+`flush()`, and a later call replaces them until then; `connection` is the
+stream server's, which closes every connection after one response. `end()`
+and `cut()` settle once the end is on the timeline. An `open` that throws
+answers the rule's 500 while nothing has gone out, and cuts the connection
+after; a request that never reaches the stream server is given up after
+`pageTimeoutMs`.
+
 `stream.requestHeaders` are the headers as the server received them, with what
 the browser adds after Playwright's route saw the request (`last-event-id`);
 `stream.closed` resolves with `ended`, `cut` or `cancelled`.
@@ -149,7 +163,8 @@ for each socket the rule takes, with `socket.page` — the page's end — and
   3000-4999 and a reason of at most 123 bytes: another code goes out as 1000,
   and a longer reason is cut, so the close still happens. The page's end takes
   any code and reason.
-- **A rule that throws** is logged and recorded as a `fault` frame with
+- **A rule that throws** — in `open`, or in an `onMessage` or `onClose`
+  handler it set — is logged and recorded as a `fault` frame with
   `meta.reason: "rule-error"` and the rule's label; the page's socket is closed
   with 1011, and a server the rule connected is closed too.
 

@@ -81,7 +81,9 @@ Filters combine field equality with `endpoint: RegExp`, `after: seq` and a
 A read is a snapshot. A response from the real backend is on the timeline once
 the browser has received all of it, so a test that reads right after the page's
 `fetch()` resolved — headers only — may be early: `waitFor` the response frame
-instead. A real backend's stream is recorded when it ends.
+instead. A real backend's stream is recorded when it ends. A read also waits
+for the streams a stub is closing, so one right after `end()` or `cut()` sees
+the end; and for a body the browser holds back, at most `pageTimeoutMs`.
 
 ## Reports
 

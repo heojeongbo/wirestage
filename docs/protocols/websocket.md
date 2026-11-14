@@ -49,8 +49,8 @@ test("a proxy that drops", async ({ page, stage }) => {
   other code reaches the server as 1000, and a longer reason is cut.
 - After a connection is over, `send`, `toPage` and `toServer` throw `CLOSED`,
   and `broadcast` skips it.
-- An `onConnect` that throws closes the page's socket with 1011 and records a
-  `fault` frame (`meta.reason: "rule-error"`).
+- An `onConnect`, or a proxy's `drop`, that throws closes the page's socket
+  with 1011 and records a `fault` frame (`meta.reason: "rule-error"`).
 
 ## When routing starts
 

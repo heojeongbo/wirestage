@@ -21,6 +21,19 @@ pnpm check:browser    # browser tests, e2e against the build, performance budget
 Do not report success on a partial run. If a step fails and you cannot fix it,
 say which step, paste the output, and say what you tried.
 
+## Releasing
+
+1. Bump `version` in `package.json` and add the `CHANGELOG.md` entry.
+2. `pnpm check` and `pnpm check:browser` in the devcontainer, then push and
+   wait for CI to pass on that commit.
+3. From a clean checkout of exactly that commit, with the built `dist`:
+   `npm publish --ignore-scripts` (the gates already ran; `.npmrc` reads the
+   token from `NPM_TOKEN`).
+4. Tag the published commit and push the tag:
+   `git tag -a vX.Y.Z <sha> -m "wirestage X.Y.Z"`, `git push origin vX.Y.Z`.
+   Every release gets its tag; check it against `npm view
+   @heojeongbo/wirestage@X.Y.Z gitHead`.
+
 ## Adding a protocol
 
 1. `src/features/<name>/` with `model/types.ts` (the public API), `lib/`

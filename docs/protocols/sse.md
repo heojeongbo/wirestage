@@ -21,7 +21,7 @@ test("the feed reconnects", async ({ page, stage }) => {
 - `send` takes a string (sent as `data`) or `{ data, event, id, retry, comment }`;
   non-string data is sent as JSON, multi-line data as several `data:` lines.
   It resolves once the event is written, and rejects with `CLOSED` when the
-  connection is over.
+  connection is over — the page let go of it, or it ended.
 - `end()` closes cleanly. An `EventSource` reconnects after its retry delay,
   through your route again, carrying `Last-Event-ID` — read it as
   `connection.lastEventId` (the browser adds the header after Playwright's
@@ -31,7 +31,10 @@ test("the feed reconnects", async ({ page, stage }) => {
   (`readyState` 2). Use `end()` to test reconnects, `cut()` to test giving up.
 - `connection.closed` resolves with `ended`, `cut` or `cancelled` (the page
   closed it, navigated or went away). The timeline has the same: a `lifecycle`
-  frame for an end, a `fault` with `meta.reason: "cut"` for a cut.
+  frame for an end, a `fault` with `meta.reason: "cut"` for a cut. `end()` and
+  `cut()` resolve once it is there.
+- Every response closes its connection (`connection: close`): a browser that
+  kept one open would send its next request down it, where no stream waits.
 - `stream` takes `times`, `match`, `status`, `headers` and `retry`;
   `stub.broadcast(event)` sends to every open connection, and
   `stage.sse.events()` lists what was sent.

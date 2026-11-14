@@ -5,13 +5,29 @@
 Server streams and SSE are answered from a local server on 127.0.0.1: the
 page's request is redirected there with `route.continue({ url })`.
 
-- **Chromium's Local Network Access** blocks a page whose address space it
-  cannot place — any page a route fulfilled, any remote origin — from reaching
-  loopback. wirestage grants `local-network-access` to a context the first
-  time it opens a live stream there; the grant stays for the life of the
-  context. A page served by a real dev server on localhost needs nothing. If
-  you launch Chromium yourself with a policy that refuses the grant, add
+- **Chromium's Local Network Access** keeps a page from reaching loopback
+  unless the page came from there. A page a real dev server on localhost
+  serves needs nothing. For a page a route fulfilled on `localhost`,
+  `127.0.0.1`, `*.localhost` or an `https://` origin, wirestage grants
+  `local-network-access` to that page's origin each time it opens a live
+  stream. Two consequences:
+  - A route-fulfilled page on any other plain-http origin (`http://app.test`)
+    cannot reach the stream server at all, granted or not: Chromium does not
+    let a page that is not a secure context reach loopback. Serve it from
+    localhost or https, or use `connect({ streaming: "buffered" })` for streams
+    that end.
+  - Playwright's grant leaves that origin only the permissions granted to it.
+    The ones your test granted for the origin are kept; every other permission
+    there becomes `denied`, context-wide grants included. Grant what the test
+    needs with `context.grantPermissions([...], { origin })`. Other origins
+    are untouched.
+
+  If you launch Chromium yourself with a policy that refuses the grant, add
   `--disable-features=LocalNetworkAccessChecks`.
+- **The request never reached the stream server** — the page let go first, or
+  never came for it. The stream is given up after `pageTimeoutMs`, with a
+  warning and a `fault` frame with `meta.reason: "unreached"` (or `"network"`,
+  with the browser's error, when the request failed).
 - **https pages** need a stream server with TLS, because Playwright only
   redirects within the same scheme: `createStage({ streamServer: { tls: { key, cert } } })`.
   Without it the stub answers 500 with a message saying so; or use
@@ -57,9 +73,12 @@ shows which rule handled what.
 
 ## The page gets a 500 it did not expect
 
-A rule threw. The body names it — `wirestage: rule "GET /rooms/:id" failed:
-…` — the error is logged, and the timeline has a `fault` frame with
-`meta.reason: "rule-error"`.
+A rule threw, or answered something the browser would refuse: a `continue`
+to another scheme, an unknown abort code, a header with a line break or an
+invalid name. The body names the rule — `wirestage: rule "GET /rooms/:id"
+failed: …` — the error is logged, and the timeline has a `fault` frame with
+`meta.reason: "rule-error"`. A stream rule that throws once its head went out
+cuts the connection instead.
 
 ## A WebSocket closes with 1011
 
@@ -72,7 +91,10 @@ and the timeline has a `fault` frame with `meta.reason: "rule-error"`.
 A response from the real backend is recorded once the browser has received
 all of it. Right after the page's `fetch()` resolved, only the headers have
 arrived: `await stage.waitFor({ kind: "response" })`. A request the browser
-redirected is recorded with the redirect's status.
+redirected is recorded with the redirect's status. While a page shows a
+dialog, the browser holds response bodies back: a read waits for one at most
+`pageTimeoutMs`, with a warning, and the response is recorded when it
+arrives.
 
 ## An EventSource does not reconnect after `cut()`
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.1 (2026-11-14)
+
+Fixes from the review of 0.1.0.
+
+- HTTP: a stream rule that throws answers the rule's 500, or cuts the
+  connection once its head went out, and is recorded as a rule error instead
+  of a page cancel. An answer the browser would refuse — a `continue` to
+  another scheme, an unknown abort code, a header with a line break — answers
+  that 500 instead of leaving the request hanging. A relative `continue` URL is
+  resolved against the request; header values other than `set-cookie` are
+  folded.
+- Live streams: a cut before the first byte no longer turns into a 404 after a
+  clean stream (every stream-server response closes its connection); a stream
+  whose request never reaches the stream server is released and recorded as
+  `unreached`; `write()` no longer hangs when it races the page's close; SSE's
+  `end()` and `cut()` resolve once the end is on the timeline; `head()` carries
+  several `set-cookie` values.
+- Reads no longer wait for a response body behind a page dialog longer than
+  `pageTimeoutMs`.
+- `local-network-access` is granted per stream to the page's origin, and not
+  at all to pages served from loopback, instead of once to the whole context
+  — which denied the context's other permissions.
+- WebSocket: a socket handler a rule set — a proxy's `drop` included — that
+  throws fails the rule (1011, `rule-error`) instead of becoming an uncaught
+  exception in the test run.
+
 ## 0.1.0 (2026-11-14)
 
 First release.

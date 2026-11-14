@@ -93,10 +93,14 @@ browser reaches means the logic belongs behind a port.
 `createManualClock()`.
 
 **Live streams redirect to a local server.** `route.fulfill` cannot stream.
-The redirect needs `local-network-access` in Chromium (granted lazily by the
-router), the same scheme as the page (TLS for https), and the stream server
-answers CORS and Private Network Access preflights. Streams are spread over
-several ports: a browser opens six connections to one.
+The redirect needs `local-network-access` in Chromium (granted per stream to
+the page's origin, skipped for pages served from loopback; a route-fulfilled
+page on a plain-http, non-loopback origin cannot reach loopback at all), the
+same scheme as the page (TLS for https), and the stream server answers CORS
+and Private Network Access preflights. Every stream-server response closes its
+connection, or the browser re-sends a request down a reused one where no
+session waits. Streams are spread over several ports: a browser opens six
+connections to one.
 
 **Match real servers, even when it is inconvenient.** Stubs run connect-es's
 own handlers: headers arrive with the first message, errors are encoded the
@@ -104,9 +108,11 @@ way Connect encodes them. A test tool that is more convenient than the server
 hides the bugs the test was written for.
 
 **Errors are contained and named.** An HTTP rule that throws answers 500 with
-its label, a socket rule closes the page's socket with 1011, and both record a
-`rule-error` fault; attach rolls back; detach and dispose run every step and
-throw what failed at the end. Nothing rejects into Playwright, where it would surface in
+its label (a stream rule cuts the connection once its head went out), and so
+does an answer Playwright would refuse, checked before the route is touched; a
+socket rule — or a handler it set — that throws closes the page's socket with
+1011; all record a `rule-error` fault. Attach rolls back; detach and dispose
+run every step and throw what failed at the end. Nothing rejects into Playwright, where it would surface in
 whichever test runs next.
 
 **No `console`, no `any`.** Log through `createScopedLogger(scope)`; the
