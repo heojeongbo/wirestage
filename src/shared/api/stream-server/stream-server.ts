@@ -37,7 +37,9 @@ export interface StreamServer {
 	/**
 	 * Register a handler and return the URL to redirect one request to.
 	 * `secure` is whether the page's request was https: Playwright only lets
-	 * `route.continue` change the URL within the same scheme.
+	 * `route.continue` change the URL within the same scheme. Every response
+	 * closes its connection (`connection: close`); a handler leaves that
+	 * header alone.
 	 */
 	open(
 		handler: NodeHandler,
@@ -107,6 +109,11 @@ export function createStreamServer(
 	};
 
 	const onRequest = (request: IncomingMessage, response: ServerResponse) => {
+		// One response per connection. A browser re-sends a request that dies
+		// before its first byte on a connection it reused — a stream cut at
+		// once — and its session is gone by then: the page would get a 404
+		// where the test cut the stream.
+		response.setHeader("connection", "close");
 		allowCors(request, response);
 		if (request.method === "OPTIONS") {
 			response.writeHead(204);
@@ -143,8 +150,9 @@ export function createStreamServer(
 					return;
 				}
 				options.log?.error("stream handler failed", { session: id }, error);
-				if (!response.headersSent) response.writeHead(500);
-				response.end();
+				// After the head, a clean end would pass for the whole response.
+				if (response.headersSent) response.destroy();
+				else response.writeHead(500).end();
 			});
 	};
 

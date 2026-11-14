@@ -30,6 +30,8 @@ export interface ResponsePort {
 	status(): number;
 	headers(): HeaderMap;
 	body(): Promise<Buffer>;
+	/** Who sent it; null for a response a route made up. */
+	serverAddr(): Promise<{ ipAddress: string; port: number } | null>;
 }
 
 export interface RequestPort {
@@ -44,8 +46,11 @@ export interface RequestPort {
 	allHeaders(): Promise<HeaderMap>;
 	postDataBuffer(): Buffer | null;
 	resourceType(): string;
-	/** Throws for requests a service worker makes; callers must guard it. */
-	frame(): { page(): PagePort };
+	/**
+	 * The frame that sent it, the same object for every request of that
+	 * frame. Throws for requests a service worker makes; callers must guard it.
+	 */
+	frame(): { url(): string; page(): PagePort };
 	response(): Promise<ResponsePort | null>;
 	failure(): { errorText: string } | null;
 }

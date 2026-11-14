@@ -31,9 +31,15 @@ export interface SseConnection {
 	readonly sent: number;
 	/** Write an event. A string is sent as `data`. Resolves once written. */
 	send(event: SseEvent | string): Promise<void>;
-	/** Close cleanly; EventSource will reconnect after its retry delay. */
+	/**
+	 * Close cleanly; EventSource will reconnect after its retry delay.
+	 * Resolves once the end is on the timeline.
+	 */
 	end(): Promise<void>;
-	/** Reset the connection, as a network drop would. */
+	/**
+	 * Reset the connection, as a network drop would. Resolves once the cut is
+	 * on the timeline.
+	 */
 	cut(): Promise<void>;
 	readonly closed: Promise<SseEnd>;
 }

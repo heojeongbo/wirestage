@@ -21,23 +21,26 @@ export interface ResponseStream {
 	readonly requestHeaders: Readonly<Record<string, string>>;
 	/**
 	 * Set the status and headers. They go out with the first `write`, or at
-	 * once on `flush`. Without a call the response is a bare 200.
+	 * once on `flush`, and a later call replaces them until then. Without a
+	 * call the response is a bare 200. A header may carry several values
+	 * separated by a newline (`set-cookie`). `connection` is the stream
+	 * server's: it closes every connection after one response.
 	 */
 	head(status: number, headers?: Readonly<Record<string, string>>): void;
 	/** Send the head now, before any body: an EventSource opens on it. */
 	flush(): void;
 	/**
 	 * Write a chunk. Resolves once it is handed to the socket; rejects with
-	 * `CLOSED` when the response is over.
+	 * `CLOSED` when the response is over, the page letting go included.
 	 */
 	write(chunk: Uint8Array | string): Promise<void>;
-	/** End the response cleanly. Resolves once it is closed. */
+	/** End the response cleanly. Resolves once it is closed, as `closed` does. */
 	end(): Promise<void>;
 	/**
 	 * Reset the connection mid-response: no terminator, no trailer — what a
 	 * network drop looks like to the page.
 	 */
 	cut(): void;
-	/** Resolves when the response is over, with how. */
+	/** Resolves when the response is over, with how, once that is on the timeline. */
 	readonly closed: Promise<StreamEnd>;
 }

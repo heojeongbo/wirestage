@@ -5,10 +5,16 @@
  * what the library relies on AND what it has to survive:
  *
  * - routes run newest first and `fallback()` hands the request to the next;
+ * - a route is handled once an answer starts, before Playwright checks it:
+ *   a second answer is refused, and a refused first one leaves the request
+ *   hanging — see `createFakeRoute`;
+ * - Chromium drops a fulfilled or continued request whose headers it
+ *   refuses, while Playwright reports the answer sent: the request hangs;
  * - a request a route answered still fires `requestfinished` (fulfilled) or
  *   `requestfailed` (aborted), with the route's answer as its response;
  * - `continue({ url })` really sends the request there, so the stream server
- *   is exercised over a real socket;
+ *   is exercised over a real socket — and a response cut short fails, as in
+ *   Chromium, even when the server said `connection: close`;
  * - a binding name can be exposed once per context; once removed, it is gone
  *   from every document, and a document that kept a reference to it gets a
  *   synchronous throw — while a binding that throws in Node rejects;
@@ -23,6 +29,8 @@
  * - a WebSocket's ends pass messages on and close the way Playwright's do:
  *   see `createFakeWebSocketRoute`.
  */
+import { request as httpRequest } from "node:http";
+
 import type {
 	BindingSourcePort,
 	ContextPort,
@@ -34,6 +42,7 @@ import type {
 	RequestPort,
 	ResponsePort,
 	RouteHandler,
+	RoutePort,
 	UrlPredicate,
 	WebSocketRoutePort,
 } from "../shared/api/playwright/index.js";
@@ -48,7 +57,15 @@ export type FakeOutcome =
 	  }
 	| { readonly kind: "continue"; readonly options: ContinueOptions | undefined }
 	| { readonly kind: "abort"; readonly error: string | undefined }
-	| { readonly kind: "network" };
+	| { readonly kind: "network" }
+	/**
+	 * Handled, and never answered: Playwright refused the answer after it
+	 * marked the route handled, or Chromium dropped it. The page waits.
+	 */
+	| { readonly kind: "hung" };
+
+/** What a request's `frame()` gives: Playwright's `Frame`, as far as the ports go. */
+export type FakeRequestFrame = ReturnType<RequestPort["frame"]>;
 
 export interface FakeRequestInit {
 	readonly method?: string;
@@ -58,6 +75,12 @@ export interface FakeRequestInit {
 	readonly resourceType?: string;
 	/** A service-worker request: `frame()` throws. */
 	readonly frameless?: boolean;
+	/**
+	 * The frame that sends it, for requests that must share one (a document
+	 * and the requests it makes). By default a frame of its own, showing a
+	 * document at the root of the request's origin.
+	 */
+	readonly frame?: FakeRequestFrame;
 }
 
 export class FakeRequest implements RequestPort {
@@ -90,11 +113,13 @@ export class FakeRequest implements RequestPort {
 	resourceType(): string {
 		return this.#init.resourceType ?? "fetch";
 	}
-	frame(): { page(): PagePort } {
+	frame(): FakeRequestFrame {
 		if (this.#init.frameless)
 			throw new Error("service worker request has no frame");
+		if (this.#init.frame !== undefined) return this.#init.frame;
 		const page = this.#init.page;
 		return {
+			url: () => `${new URL(this.#url).origin}/`,
 			page: () => {
 				if (page === undefined) throw new Error("no page");
 				return page;
@@ -123,6 +148,139 @@ export function fakeResponse(
 			body instanceof Error
 				? Promise.reject(body)
 				: Promise.resolve(Buffer.from(typeof body === "string" ? body : body)),
+		// What Playwright says of a response a route made up: no server sent it.
+		serverAddr: () => Promise.resolve(null),
+	};
+}
+
+/** Playwright's `route.abort` codes; any other is refused. */
+const ABORT_CODES = new Set([
+	"aborted",
+	"accessdenied",
+	"addressunreachable",
+	"blockedbyclient",
+	"blockedbyresponse",
+	"connectionaborted",
+	"connectionclosed",
+	"connectionfailed",
+	"connectionrefused",
+	"connectionreset",
+	"internetdisconnected",
+	"namenotresolved",
+	"timedout",
+	"failed",
+]);
+
+/** RFC 9110's `token`: what Chromium takes as a header name. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/**
+ * Whether Chromium drops an answer with these headers. It refuses a name
+ * that is not a token and a value with CR, LF or NUL — after Playwright has
+ * split `set-cookie` into a header per line — and Playwright swallows the
+ * refusal, so the answer reads as sent while the request hangs.
+ */
+function refusedHeaders(headers: Record<string, string> | undefined): boolean {
+	return Object.entries(headers ?? {}).some(
+		([name, value]) =>
+			!HEADER_NAME.test(name) ||
+			(name.toLowerCase() === "set-cookie" ? value.split("\n") : [value]).some(
+				(line) => /[\r\n\0]/.test(line),
+			),
+	);
+}
+
+/**
+ * Send a continued request where it now goes, failing its response as
+ * Chromium does when the server closes the connection before the body is
+ * whole. Node's http client does that; `fetch` takes a body for complete
+ * once the server said `connection: close`, cut or not.
+ */
+function forward(
+	url: string,
+	init: {
+		readonly method: string;
+		readonly headers: Record<string, string>;
+		readonly signal: AbortSignal;
+		readonly body: Uint8Array | undefined;
+	},
+): Promise<Response> {
+	return new Promise<Response>((resolve, reject) => {
+		const outgoing = httpRequest(
+			url,
+			{ method: init.method, headers: init.headers, signal: init.signal },
+			(incoming) => {
+				const headers = new Headers();
+				for (let i = 0; i < incoming.rawHeaders.length; i += 2)
+					headers.append(
+						incoming.rawHeaders[i] as string,
+						incoming.rawHeaders[i + 1] as string,
+					);
+				const body = new ReadableStream<Uint8Array>({
+					start(controller) {
+						incoming.on("data", (chunk: Buffer) =>
+							controller.enqueue(new Uint8Array(chunk)),
+						);
+						incoming.on("end", () => controller.close());
+						incoming.on("error", (error) =>
+							controller.error(
+								new TypeError("network error", { cause: error }),
+							),
+						);
+					},
+					cancel() {
+						incoming.destroy();
+					},
+				});
+				resolve(
+					new Response(incoming.statusCode === 204 ? null : body, {
+						status: incoming.statusCode,
+						headers,
+					}),
+				);
+			},
+		);
+		outgoing.on("error", (error) =>
+			reject(new TypeError("fetch failed", { cause: error })),
+		);
+		outgoing.end(init.body === undefined ? undefined : Buffer.from(init.body));
+	});
+}
+
+export interface FakeRoute extends RoutePort {
+	/** An answer has started: no other is taken. */
+	readonly handled: boolean;
+}
+
+/**
+ * A route that takes one answer, the way Playwright's does. The route is
+ * handled once an answer starts — Playwright marks it before checking the
+ * answer — so a second answer is refused with "Route is already handled!",
+ * whether the first was carried out or refused.
+ */
+export function createFakeRoute(
+	request: RequestPort,
+	answers: Partial<Omit<RoutePort, "request">>,
+): FakeRoute {
+	let handled = false;
+	const answer =
+		<Args extends unknown[]>(
+			carryOut: ((...args: Args) => Promise<void>) | undefined,
+		) =>
+		async (...args: Args): Promise<void> => {
+			if (handled) throw new Error("Route is already handled!");
+			handled = true;
+			await carryOut?.(...args);
+		};
+	return {
+		get handled() {
+			return handled;
+		},
+		request: () => request,
+		fulfill: answer(answers.fulfill),
+		continue: answer(answers.continue),
+		fallback: answer(answers.fallback),
+		abort: answer(answers.abort),
 	};
 }
 
@@ -442,33 +600,47 @@ export function createFakeContext(
 				const entry = routes[i];
 				if (entry === undefined || !entry.predicate(parsed)) continue;
 				let decided: FakeOutcome | "fallback" | undefined;
-				await entry.handler(
-					{
-						request: () => request,
-						async fulfill(o: FulfillOptions) {
-							decided = {
-								kind: "fulfill",
-								status: o.status ?? 200,
-								headers: { ...o.headers },
-								body:
-									o.body === undefined ? Buffer.alloc(0) : Buffer.from(o.body),
-							};
-						},
-						async continue(o?: ContinueOptions) {
-							decided = { kind: "continue", options: o };
-						},
-						async fallback() {
-							decided = "fallback";
-						},
-						async abort(error?: string) {
-							decided = { kind: "abort", error };
-						},
+				const route = createFakeRoute(request, {
+					async fulfill(o: FulfillOptions) {
+						decided = refusedHeaders(o.headers)
+							? { kind: "hung" }
+							: {
+									kind: "fulfill",
+									status: o.status ?? 200,
+									headers: { ...o.headers },
+									body:
+										o.body === undefined
+											? Buffer.alloc(0)
+											: Buffer.from(o.body),
+								};
 					},
-					request,
-				);
+					async continue(o?: ContinueOptions) {
+						// Playwright's own check, made after the route is handled; a
+						// relative URL fails it too ("Invalid URL").
+						if (o?.url && new URL(o.url).protocol !== parsed.protocol)
+							throw new Error(
+								"New URL must have same protocol as overridden URL",
+							);
+						decided = refusedHeaders(o?.headers)
+							? { kind: "hung" }
+							: { kind: "continue", options: o };
+					},
+					async fallback() {
+						decided = "fallback";
+					},
+					async abort(error?: string) {
+						if (error !== undefined && !ABORT_CODES.has(error))
+							throw new Error(`Unknown error code: ${error}`);
+						decided = { kind: "abort", error };
+					},
+				});
+				await entry.handler(route, request);
 				if (decided === "fallback") continue;
-				if (decided === undefined)
-					throw new Error("route handler did not decide");
+				if (decided === undefined) {
+					if (!route.handled) throw new Error("route handler did not decide");
+					// Its one answer was refused: nothing else will be taken.
+					decided = { kind: "hung" };
+				}
 				// Like Playwright: a request a route answered still finishes or
 				// fails, with the route's answer as its response.
 				if (decided.kind === "fulfill") {
@@ -508,11 +680,13 @@ export function createFakeContext(
 				);
 				switch (outcome.kind) {
 					case "fulfill": {
-						// Like Playwright: a header with several values (`set-cookie`)
-						// is given as one, a value per line.
+						// Like Playwright: `set-cookie` takes several values, a value
+						// per line; any other header is sent as given.
 						const fulfilled = new Headers();
 						for (const [name, value] of Object.entries(outcome.headers))
-							for (const line of value.split("\n"))
+							for (const line of name.toLowerCase() === "set-cookie"
+								? value.split("\n")
+								: [value])
 								fulfilled.append(name, line);
 						return new Response(
 							outcome.status === 204 ? null : new Uint8Array(outcome.body),
@@ -521,17 +695,22 @@ export function createFakeContext(
 					}
 					case "abort":
 						throw new TypeError(`fetch failed: ${outcome.error}`);
-					case "continue": {
-						const target = outcome.options?.url ?? request.url;
-						return fetch(target, {
+					case "hung":
+						// Nothing ever comes; only the page giving up ends it.
+						return new Promise<Response>((_resolve, reject) => {
+							request.signal.addEventListener(
+								"abort",
+								() => reject(request.signal.reason),
+								{ once: true },
+							);
+						});
+					case "continue":
+						return forward(outcome.options?.url ?? request.url, {
 							method: outcome.options?.method ?? request.method,
 							headers: outcome.options?.headers ?? headers,
 							signal: request.signal,
-							...(body === undefined || request.method === "GET"
-								? {}
-								: { body }),
+							body: request.method === "GET" ? undefined : body,
 						});
-					}
 					case "network": {
 						if (network === undefined)
 							return new Response("no network", { status: 502 });

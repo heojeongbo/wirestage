@@ -1572,6 +1572,22 @@ describe("every stub means the same by a call", () => {
 		]);
 	});
 
+	it("delivers every cookie a live stream sets, as the unary path does", async () => {
+		const { stage, web } = await setup();
+		await stage.connect.service(EchoService, {
+			async *watch(_request, handler) {
+				// Several values of one header reach the stream's head one per
+				// line, which Node refuses in a single header value.
+				handler.responseHeader.append("set-cookie", "a=1; Path=/");
+				handler.responseHeader.append("set-cookie", "b=2; Path=/");
+				yield { text: "first" };
+			},
+		});
+		expect((await collect(web.watch({}))).map((m) => m.text)).toEqual([
+			"first",
+		]);
+	});
+
 	it("runs twice under two names, each with its own stubs and calls", async () => {
 		const stage = createStage({
 			plugins: [

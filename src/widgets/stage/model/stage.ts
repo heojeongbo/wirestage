@@ -30,9 +30,11 @@ export interface StageOptions<Plugins extends readonly AnyWirePlugin[]> {
 	 */
 	readonly pageFlushMs?: number;
 	/**
-	 * How long a page may take to answer a flush or a command before a read
-	 * goes on without it — and Playwright to take the page hooks out before a
-	 * detach goes on. Default 2000 ms.
+	 * How long a page may take to answer a flush or a command, or the
+	 * browser to hand over a response's body, before a read goes on without
+	 * it; how long a live stream's request may take to reach the stream
+	 * server before the stream is given up; and how long Playwright may take
+	 * to take the page hooks out before a detach goes on. Default 2000 ms.
 	 */
 	readonly pageTimeoutMs?: number;
 	/** TLS for live streams on https pages, and the bind host. */
@@ -79,9 +81,9 @@ export interface StageCore {
 	/** The id frames use for this page. */
 	pageId(page: PagePort): string;
 	/**
-	 * Bring the timeline up to date: flush every page's buffer and wait for
-	 * the responses already back from the network. The reads below do it for
-	 * you.
+	 * Bring the timeline up to date: flush every page's buffer, and wait for
+	 * the responses already back from the network and the ends of the
+	 * streams a stub closed. The reads below do it for you.
 	 */
 	sync(): Promise<void>;
 	frames(filter?: FrameFilter): Promise<Frame[]>;

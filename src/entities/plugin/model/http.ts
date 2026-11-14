@@ -49,7 +49,10 @@ export type AbortErrorCode =
 export type HttpOutcome =
 	/**
 	 * Answer with a complete response. A header may carry several values
-	 * separated by a newline (`set-cookie`).
+	 * separated by a newline: `set-cookie` is sent as a header line each,
+	 * any other header as one value, `, `-separated. A header Chromium
+	 * would refuse — a name that is not a token, a CR or NUL in a value — is
+	 * the rule's error.
 	 */
 	| {
 			readonly type: "fulfill";
@@ -61,13 +64,19 @@ export type HttpOutcome =
 	 * Answer with a response that stays open (server streams, SSE): `open`
 	 * gets the stream to write. The request is redirected to the stage's
 	 * local stream server, which `route.fulfill` cannot stand in for because
-	 * it takes the whole body at once.
+	 * it takes the whole body at once. An `open` that throws is the rule's
+	 * error, as a throwing `handle` is: the page gets the 500 while nothing
+	 * has gone out, and a cut connection after.
 	 */
 	| {
 			readonly type: "stream";
 			open(stream: ResponseStream): void | Promise<void>;
 	  }
-	/** Send to the network, optionally rewritten. Lower rules are skipped. */
+	/**
+	 * Send to the network, optionally rewritten. Lower rules are skipped.
+	 * `url` may be relative to the request's, and keeps its scheme:
+	 * Playwright rewrites a URL within its scheme only.
+	 */
 	| {
 			readonly type: "continue";
 			readonly url?: string;

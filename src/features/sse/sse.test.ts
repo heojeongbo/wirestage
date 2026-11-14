@@ -142,6 +142,27 @@ describe("sse plugin", () => {
 		);
 	});
 
+	it("has a cut or an end on the timeline once cut() or end() resolves", async () => {
+		const { stage, fetch } = await setup();
+		const stub = await stage.sse.stream("/events");
+		/** The raw timeline: no read in between to wait for anything. */
+		const endings = () =>
+			stage.timeline
+				.frames({ protocol: "sse", kind: ["fault", "lifecycle"] })
+				.map((f) => f.meta);
+		const cutting = await fetch("http://app.test/events");
+		await (await stub.next()).cut();
+		expect(endings()).toEqual([{ reason: "cut" }]);
+		await expect(cutting.text()).rejects.toThrow();
+		const ending = await fetch("http://app.test/events");
+		await (await stub.next()).end();
+		expect(endings()).toEqual([
+			{ reason: "cut" },
+			{ event: "close", end: "ended" },
+		]);
+		expect(await ending.text()).toBe("");
+	});
+
 	it("says so when a request matched but its stream never arrived", async () => {
 		const { stage, context } = await setup();
 		const stub = await stage.sse.stream("/events");

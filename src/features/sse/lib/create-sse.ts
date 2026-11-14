@@ -52,7 +52,6 @@ export function sse(): WirePlugin<"sse", SseApi> {
 									stream.head(streamOptions.status ?? 200, {
 										"content-type": "text/event-stream; charset=utf-8",
 										"cache-control": "no-cache",
-										connection: "keep-alive",
 										...streamOptions.headers,
 									});
 									// An EventSource opens on the headers, before any event.
@@ -84,6 +83,8 @@ export function sse(): WirePlugin<"sse", SseApi> {
 										end: () => stream.end(),
 										async cut() {
 											stream.cut();
+											// The stage records the end before `closed` resolves.
+											await stream.closed;
 										},
 										closed: stream.closed,
 									};

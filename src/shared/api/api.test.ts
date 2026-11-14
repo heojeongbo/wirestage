@@ -120,6 +120,42 @@ describe("stream server", () => {
 		expect((await fetch(session.url)).status).toBe(404);
 	});
 
+	it("closes every connection after one response", async () => {
+		const server = track(createStreamServer());
+		const session = await server.open(
+			(_request, response) => {
+				response.end("streamed");
+			},
+			{ secure: false },
+		);
+		/** A raw exchange, so nothing hides how the connection ends. */
+		const exchange = (method: string, path: string) =>
+			new Promise<string>((resolve) => {
+				const url = new URL(path, session.url);
+				const socket = connect(Number(url.port), url.hostname, () =>
+					socket.write(
+						`${method} ${url.pathname} HTTP/1.1\r\nhost: x\r\norigin: http://app.test\r\n\r\n`,
+					),
+				);
+				let data = "";
+				socket.on("data", (chunk) => {
+					data += chunk.toString();
+				});
+				// The server ends it: the browser has no kept-alive connection
+				// to re-send a request on.
+				socket.on("end", () => resolve(data));
+			});
+		for (const [method, path, status] of [
+			["OPTIONS", session.url, "204"],
+			["GET", session.url, "200"],
+			["GET", session.url, "404"],
+		] as const) {
+			const raw = await exchange(method, path);
+			expect(raw).toMatch(new RegExp(`^HTTP/1.1 ${status} `));
+			expect(raw.toLowerCase()).toContain("connection: close");
+		}
+	});
+
 	it("agrees to a Private Network Access preflight, and only when asked", async () => {
 		const server = track(createStreamServer());
 		const session = await server.open(() => {}, { secure: false });
@@ -194,18 +230,31 @@ describe("stream server", () => {
 			expect.objectContaining({ session: failing.id }),
 			expect.any(Error),
 		);
-		// Headers already sent: the response is ended, not answered twice.
+		// Headers already sent: the connection is cut, not ended — a clean
+		// end would pass for the whole response.
 		const late = await server.open(
-			(_request, response) => {
+			async (_request, response) => {
 				response.writeHead(200);
-				response.write("partial");
+				await new Promise((resolve) => response.write("partial", resolve));
 				throw new Error("after headers");
 			},
 			{ secure: false },
 		);
-		const response = await fetch(late.url);
-		expect(response.status).toBe(200);
-		expect(await response.text()).toBe("partial");
+		const raw = await new Promise<string>((resolve) => {
+			const url = new URL(late.url);
+			const socket = connect(Number(url.port), url.hostname, () =>
+				socket.write(`GET ${url.pathname} HTTP/1.1\r\nhost: x\r\n\r\n`),
+			);
+			let data = "";
+			socket.on("data", (chunk) => {
+				data += chunk.toString();
+			});
+			socket.on("close", () => resolve(data));
+		});
+		expect(raw).toMatch(/^HTTP\/1.1 200 /);
+		expect(raw).toContain("partial");
+		// No last chunk: the page sees a response cut short, not a whole one.
+		expect(raw.endsWith("0\r\n\r\n")).toBe(false);
 	});
 
 	it("logs a failure on a connection already gone at debug, not error", async () => {

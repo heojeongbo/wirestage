@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
 	createFakeContext,
+	createFakeRoute,
+	type FakeRequest,
 	fakeResponse,
 } from "../../../__fixtures__/fake-playwright.js";
 import { createTimeline } from "../../../entities/frame/index.js";
@@ -38,8 +40,12 @@ const attachmentOf = (
 	context: ReturnType<typeof createFakeContext>,
 ): AttachedContext => ({ id, context, cookies: context, baseURL: undefined });
 
+/** What the router waits on the browser for, in these tests. */
+const TIMEOUT_MS = 1_000;
+
 function setup() {
-	const timeline = createTimeline({ clock: createManualClock() });
+	const clock = createManualClock();
+	const timeline = createTimeline({ clock });
 	const log = createScopedLogger("Http");
 	const streams = createStreamServer();
 	servers.push(streams);
@@ -49,10 +55,12 @@ function setup() {
 		streams,
 		pageId: createObjectIds("p"),
 		correlation: createSequence("x"),
+		clock,
+		timeoutMs: TIMEOUT_MS,
 	});
 	const context = createFakeContext();
 	const attachment = attachmentOf("c1", context);
-	return { timeline, log, router, context, attachment, streams };
+	return { clock, timeline, log, router, context, attachment, streams };
 }
 
 const rule = (over: Partial<HttpRule> = {}): HttpRule => ({
@@ -79,20 +87,22 @@ async function captured(over?: Partial<HttpRule>) {
 	});
 	await harness.router.attach(harness.attachment);
 	const handle = await harness.router.add(rule(over));
+	/** Run the handler with answers of the test's own, taken once as Playwright takes them. */
 	const run = async (
-		route: Partial<RoutePort>,
+		route:
+			| Partial<Omit<RoutePort, "request">>
+			| ((request: FakeRequest) => Partial<Omit<RoutePort, "request">>),
 		url = "http://app.test/api/x",
 	) => {
 		const { request } = await harness.context.dispatch(url);
 		await (handler as RouteHandler)(
-			{
-				request: () => request,
+			createFakeRoute(request, {
 				fulfill: vi.fn().mockResolvedValue(undefined),
 				continue: vi.fn().mockResolvedValue(undefined),
 				fallback: vi.fn().mockResolvedValue(undefined),
 				abort: vi.fn().mockResolvedValue(undefined),
-				...route,
-			},
+				...(typeof route === "function" ? route(request) : route),
+			}),
 			request,
 		);
 		return request;
@@ -544,8 +554,7 @@ describe("http router: the network's answer", () => {
 		const { request } = await context.dispatch("http://app.test/api/x");
 		let release!: (body: Buffer) => void;
 		request.responseValue = {
-			status: () => 200,
-			headers: () => ({}),
+			...fakeResponse(200, {}, ""),
 			// Reading the body is a round trip to the browser.
 			body: () =>
 				new Promise<Buffer>((resolve) => {
@@ -569,6 +578,41 @@ describe("http router: the network's answer", () => {
 		]);
 		// With nothing in flight it returns at once.
 		await router.settle();
+	});
+
+	it("goes on after timeoutMs without a body that does not come, and records it when it does", async () => {
+		const harness = await attached({ handle: () => ({ type: "fallback" }) });
+		const warn = vi.spyOn(harness.log, "warn").mockImplementation(() => {});
+		const { request } = await harness.context.dispatch("http://app.test/api/x");
+		let release!: (body: Buffer) => void;
+		request.responseValue = {
+			...fakeResponse(200, {}, ""),
+			// Behind a dialog, the browser hands over no body until it closes.
+			body: () =>
+				new Promise<Buffer>((resolve) => {
+					release = resolve;
+				}),
+		};
+		harness.context.emit("requestfinished", request);
+		const settling = harness.router.settle().then(() => "settled");
+		await harness.clock.advance(TIMEOUT_MS);
+		expect(
+			await Promise.race([
+				settling,
+				new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
+			]),
+		).toBe("settled");
+		expect(warn).toHaveBeenCalledWith(
+			"a response did not hand over its body in time; reads go on without it until it does (is a dialog open?)",
+			{ url: "http://app.test/api/x", timeoutMs: TIMEOUT_MS },
+		);
+		// A later read does not wait for it again.
+		await harness.router.settle();
+		expect(harness.timeline.frames().map((f) => f.kind)).toEqual(["request"]);
+		release(Buffer.from("late"));
+		await vi.waitFor(() =>
+			expect(harness.timeline.last()?.payload.text()).toBe("late"),
+		);
 	});
 
 	it("ignores a finished request with no response, or one it never saw", async () => {
@@ -748,36 +792,177 @@ describe("http router: streams", () => {
 		);
 	});
 
-	it("grants local-network-access once per context, and makes every stream wait for it", async () => {
+	it("grants local-network-access to the page's origin before each stream", async () => {
 		const { opened, rule: over } = streaming();
 		const { context } = await attached(over);
+		const page = context.newPage();
 		const order: string[] = [];
-		let granted!: () => void;
+		const grants: (() => void)[] = [];
 		context.grantPermissions = vi.fn(
 			() =>
 				new Promise<void>((resolve) => {
 					order.push("grant requested");
-					granted = () => {
+					grants.push(() => {
 						order.push("granted");
 						resolve();
-					};
+					});
 				}),
 		);
 		const fetches = [
-			context.fetch()("http://app.test/api/a"),
-			context.fetch()("http://app.test/api/b"),
+			context.fetch({ page })("http://localhost:4510/api/a"),
+			context.fetch({ page })("http://localhost:4510/api/b"),
 		];
-		await vi.waitFor(() => expect(order).toEqual(["grant requested"]));
-		// Neither request has been sent on: both wait for the one grant.
+		await vi.waitFor(() =>
+			expect(order).toEqual(["grant requested", "grant requested"]),
+		);
+		// Neither request has been sent on: each waits for its own grant.
 		expect(opened).toHaveLength(0);
-		granted();
+		grants[0]?.();
+		await vi.waitFor(() => expect(opened).toHaveLength(1));
+		grants[1]?.();
 		await vi.waitFor(() => expect(opened).toHaveLength(2));
-		expect(context.grantPermissions).toHaveBeenCalledTimes(1);
-		expect(context.grantPermissions).toHaveBeenCalledWith([
-			"local-network-access",
-		]);
+		// Not once per context: a test that clears its permissions, or grants
+		// that origin others, must not leave later streams without it.
+		expect(context.grantPermissions).toHaveBeenCalledTimes(2);
+		expect(context.grantPermissions).toHaveBeenCalledWith(
+			["local-network-access"],
+			{ origin: "http://localhost:4510" },
+		);
 		for (const stream of opened) await stream.end();
 		await Promise.all(fetches);
+	});
+
+	it("grants nothing where Chromium needs no grant or cannot use one", async () => {
+		const harness = setup();
+		// A stream server that takes any scheme, so an https page gets as far
+		// as the grant; the browser never comes, which is all this needs.
+		const router = createHttpRouter({
+			timeline: harness.timeline,
+			log: harness.log,
+			streams: {
+				open: async (_handler, { secure }) => ({
+					id: "s1",
+					url: `${secure ? "https" : "http"}://127.0.0.1:1/__wirestage/s1`,
+					dispose: () => {},
+				}),
+			},
+			pageId: createObjectIds("p"),
+			correlation: createSequence("x"),
+			clock: harness.clock,
+			timeoutMs: TIMEOUT_MS,
+		});
+		const { context } = harness;
+		await router.attach(harness.attachment);
+		await router.add(rule(streaming().rule));
+		const page = context.newPage();
+		const grant = vi.fn().mockResolvedValue(undefined);
+		context.grantPermissions = grant;
+		/** Every one is redirected all the same, grant or not. */
+		const redirected = async (...args: Parameters<typeof context.dispatch>) =>
+			expect((await context.dispatch(...args)).outcome.kind).toBe("continue");
+		// Not a secure context: Chromium refuses it loopback, granted or not.
+		await redirected("http://app.test/api/a", { page });
+		// A service worker's request has no page whose origin could hold it.
+		await redirected("http://localhost:4510/api/b", { frameless: true });
+		// Nor has a frame that has shown no document yet.
+		await redirected("http://localhost:4510/api/c", {
+			frame: { url: () => "", page: () => page },
+		});
+		expect(grant).not.toHaveBeenCalled();
+		// https anywhere, and http on a loopback host, are secure contexts.
+		for (const origin of [
+			"https://app.test",
+			"http://127.0.0.1:4510",
+			"http://shop.localhost",
+			"http://[::1]:4510",
+		])
+			await redirected(`${origin}/api/d`, { page });
+		expect(grant.mock.calls.map((call) => call[1])).toEqual([
+			{ origin: "https://app.test" },
+			{ origin: "http://127.0.0.1:4510" },
+			{ origin: "http://shop.localhost" },
+			{ origin: "http://[::1]:4510" },
+		]);
+		await router.detach(harness.attachment);
+	});
+
+	it("grants nothing to a page a loopback server served, but does once its document comes from elsewhere", async () => {
+		const { context } = await attached(streaming().rule);
+		const page = context.newPage();
+		const grant = vi.fn().mockResolvedValue(undefined);
+		context.grantPermissions = grant;
+		const frame = { url: () => "http://localhost:3000/app", page: () => page };
+		/** The frame's document arrives, from `ipAddress`, or from a route (null). */
+		const load = async (
+			ipAddress: string | null,
+			url = "http://localhost:3000/",
+		) => {
+			const { request } = await context.dispatch(url, {
+				resourceType: "document",
+				frame,
+			});
+			request.responseValue = {
+				...fakeResponse(200, {}, "<!doctype html>"),
+				serverAddr: async () =>
+					ipAddress === null ? null : { ipAddress, port: 3000 },
+			};
+			context.emit("requestfinished", request);
+			// Telling where it came from is two round trips to the browser.
+			await new Promise((resolve) => setImmediate(resolve));
+		};
+		const stream = () =>
+			context.dispatch("http://localhost:3000/api/feed", { frame });
+		for (const loopback of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
+			await load(loopback);
+			await stream();
+		}
+		// Its document came from loopback: there is no address space to cross.
+		expect(grant).not.toHaveBeenCalled();
+		// The same frame now shows a document a route fulfilled.
+		await load(null);
+		await stream();
+		expect(grant).toHaveBeenCalledTimes(1);
+		// One from a server that is not on loopback needs it as well.
+		await load("192.168.1.20");
+		await stream();
+		expect(grant).toHaveBeenCalledTimes(2);
+		// A loopback document of another origin says nothing of this one.
+		await load("127.0.0.1", "http://other.localhost/");
+		await stream();
+		expect(grant).toHaveBeenCalledTimes(3);
+		// Back on its own loopback server, it needs none again.
+		await load("127.0.0.1");
+		await stream();
+		expect(grant).toHaveBeenCalledTimes(3);
+		// A finished document with no response to read is no proof either.
+		const { request } = await context.dispatch("http://localhost:3000/", {
+			resourceType: "document",
+			frame,
+		});
+		context.emit("requestfinished", request);
+		await new Promise((resolve) => setImmediate(resolve));
+		await stream();
+		expect(grant).toHaveBeenCalledTimes(4);
+	});
+
+	it("notes nothing of a document it cannot place", async () => {
+		const harness = await attached(streaming().rule);
+		const debug = vi.spyOn(harness.log, "debug").mockImplementation(() => {});
+		const { request } = await harness.context.dispatch(
+			"http://localhost:3000/",
+			{
+				resourceType: "document",
+				frameless: true,
+			},
+		);
+		harness.context.emit("requestfinished", request);
+		await vi.waitFor(() =>
+			expect(debug).toHaveBeenCalledWith(
+				"could not tell where a document came from",
+				{ url: "http://localhost:3000/" },
+				expect.any(Error),
+			),
+		);
 	});
 
 	it("goes on when the browser does not know the permission", async () => {
@@ -787,29 +972,302 @@ describe("http router: streams", () => {
 		refused.context.grantPermissions = vi
 			.fn()
 			.mockRejectedValue(new Error("Unknown permission"));
-		const fetching = refused.context.fetch()("http://app.test/api/c");
+		const page = refused.context.newPage();
+		const fetching = refused.context.fetch({ page })(
+			"http://localhost:4510/api/c",
+		);
 		await vi.waitFor(() => expect(opened).toHaveLength(1));
 		await opened[0]?.end();
 		await fetching;
 		expect(debug).toHaveBeenCalledWith(
 			"local-network-access not granted",
-			{},
+			{ origin: "http://localhost:4510" },
 			expect.any(Error),
 		);
 	});
 
+	it("answers a stream rule that throws before anything went out as a throwing fulfill is answered", async () => {
+		const harness = await attached({
+			label: "feed",
+			handle: () => ({
+				type: "stream",
+				open(stream) {
+					// Held back until the first write, so the page never sees it.
+					stream.head(200, {
+						"content-type": "application/x-ndjson",
+						"content-encoding": "gzip",
+					});
+					// The ndjson example of docs/plugins.md, given a bigint.
+					return stream.write(`${JSON.stringify({ id: 1n })}\n`);
+				},
+			}),
+		});
+		const error = vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		const response = await harness.context.fetch()("http://app.test/api/feed");
+		expect(response.status).toBe(500);
+		// The rule's head is gone; the stream server's own headers stay.
+		expect(response.headers.get("content-encoding")).toBeNull();
+		expect(response.headers.get("connection")).toBe("close");
+		expect(await response.text()).toBe(
+			'wirestage: rule "feed" failed: Do not know how to serialize a BigInt',
+		);
+		await harness.router.settle();
+		// The rule's error, not the page letting go.
+		expect(
+			harness.timeline.frames().map((f) => [f.kind, f.source, f.meta]),
+		).toEqual([
+			["request", "page", expect.anything()],
+			[
+				"fault",
+				"stub",
+				{
+					reason: "rule-error",
+					error: "Do not know how to serialize a BigInt",
+				},
+			],
+		]);
+		expect(error).toHaveBeenCalledWith(
+			"rule failed",
+			{ rule: "feed", url: "http://app.test/api/feed" },
+			expect.any(TypeError),
+		);
+	});
+
+	it("cuts a stream whose rule throws once the head went out", async () => {
+		const harness = await attached({
+			handle: () => ({
+				type: "stream",
+				async open(stream) {
+					stream.head(200, { "content-type": "application/x-ndjson" });
+					await stream.write('{"n":1}\n');
+					throw new Error("bug mid-stream");
+				},
+			}),
+		});
+		vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		const response = await harness.context.fetch()("http://app.test/api/feed");
+		expect(response.status).toBe(200);
+		// Not a clean end: that would pass for the whole response.
+		await expect(response.text()).rejects.toThrow();
+		await harness.router.settle();
+		expect(harness.timeline.frames().map((f) => f.meta["reason"])).toEqual([
+			undefined,
+			"rule-error",
+		]);
+	});
+
+	it("refuses a status Node would refuse when the head is set, while the 500 can still be sent", async () => {
+		const harness = await attached({
+			handle: () => ({
+				type: "stream",
+				async open(stream) {
+					// Node would refuse it from end(), and send the 500 with no body.
+					stream.head(1000);
+					await stream.end();
+				},
+			}),
+		});
+		vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		const response = await harness.context.fetch()("http://app.test/api/feed");
+		expect(response.status).toBe(500);
+		expect(await response.text()).toBe(
+			'wirestage: rule "test rule" failed: a response status is an integer from 100 to 999, got 1000',
+		);
+	});
+
+	it("files a rule that stops once its stream was over as that end, not as an error", async () => {
+		const harness = await attached({
+			handle: () => ({
+				type: "stream",
+				async open(stream) {
+					stream.flush();
+					await stream.closed;
+					// What a write into a stream the page let go of rejects with.
+					throw new Error("the response stream is closed");
+				},
+			}),
+		});
+		const debug = vi.spyOn(harness.log, "debug").mockImplementation(() => {});
+		const leaving = new AbortController();
+		await harness.context.fetch()("http://app.test/api/feed", {
+			signal: leaving.signal,
+		});
+		leaving.abort();
+		await vi.waitFor(() =>
+			expect(debug).toHaveBeenCalledWith(
+				"a stream's rule failed after the stream was over",
+				{ rule: "test rule" },
+				expect.any(Error),
+			),
+		);
+		expect(harness.timeline.last()?.meta).toEqual({
+			event: "close",
+			end: "cancelled",
+		});
+	});
+
+	it("sends each of a header's values on a line of its own, and keeps the connection the server's", async () => {
+		const { opened, rule: over } = streaming();
+		const { context } = await attached(over);
+		const fetching = context.fetch()("http://app.test/api/feed");
+		await vi.waitFor(() => expect(opened).toHaveLength(1));
+		const [stream] = opened as [ResponseStream];
+		// A first head is replaced while nothing has gone out.
+		stream.head(201, { "x-first": "1" });
+		// Connect's and the contract's spelling of several cookies.
+		stream.head(200, {
+			"set-cookie": "a=1; Path=/\nb=2; Path=/",
+			connection: "keep-alive",
+		});
+		stream.flush();
+		const response = await fetching;
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-first")).toBeNull();
+		expect(response.headers.getSetCookie()).toEqual([
+			"a=1; Path=/",
+			"b=2; Path=/",
+		]);
+		expect(response.headers.get("connection")).toBe("close");
+		// Too late once it went out, as Node says.
+		expect(() => stream.head(204)).toThrow(/headers after they are sent/);
+		await stream.end();
+	});
+
+	it("records an end before end() resolves, and makes a read wait for a cut", async () => {
+		const { opened, rule: over } = streaming();
+		const { context, timeline, router } = await attached(over);
+		const ended = context.fetch()("http://app.test/api/a");
+		await vi.waitFor(() => expect(opened).toHaveLength(1));
+		await opened[0]?.write("x");
+		await ended;
+		await opened[0]?.end();
+		// The raw timeline: nothing to wait for any more.
+		expect(timeline.last()?.meta).toEqual({ event: "close", end: "ended" });
+		const cutting = context.fetch()("http://app.test/api/b");
+		await vi.waitFor(() => expect(opened).toHaveLength(2));
+		await opened[1]?.write("y");
+		await cutting;
+		// The contract's cut() returns at once; the close comes a turn later.
+		opened[1]?.cut();
+		await router.settle();
+		expect(timeline.last()?.meta).toEqual({ reason: "cut" });
+	});
+
+	it("gives a stream up when the browser never brings its request", async () => {
+		const harness = await attached(streaming().rule);
+		const warn = vi.spyOn(harness.log, "warn").mockImplementation(() => {});
+		// The fake leaves a redirect unfollowed, as a page that went away does.
+		await harness.context.dispatch("http://app.test/api/feed");
+		expect(harness.streams.sessions).toBe(1);
+		await harness.clock.advance(TIMEOUT_MS);
+		// Its place on the stream server is free again, and the exchange ends.
+		expect(harness.streams.sessions).toBe(0);
+		expect(harness.timeline.last()).toMatchObject({
+			kind: "fault",
+			source: "stub",
+			meta: {
+				reason: "unreached",
+				error: `the browser did not bring the request to the stream server within ${TIMEOUT_MS} ms`,
+			},
+		});
+		expect(warn).toHaveBeenCalledWith(
+			"a live stream's request never reached the stream server, and was given up",
+			{ url: "http://app.test/api/feed", timeoutMs: TIMEOUT_MS },
+		);
+	});
+
+	it("gives a stream up at once when the page lets go of it first", async () => {
+		const harness = await attached(streaming().rule);
+		const { request } = await harness.context.dispatch(
+			"http://app.test/api/feed",
+		);
+		// Just after the redirect: Playwright says the request failed.
+		request.failureText = "net::ERR_ABORTED";
+		harness.context.emit("requestfailed", request);
+		expect(harness.streams.sessions).toBe(0);
+		expect(harness.timeline.last()).toMatchObject({
+			kind: "fault",
+			source: "network",
+			meta: { reason: "network", error: "net::ERR_ABORTED" },
+		});
+		// Nothing more comes of it: not the deadline, not another failure.
+		await harness.clock.advance(TIMEOUT_MS);
+		harness.context.emit("requestfailed", request);
+		expect(harness.timeline.size).toBe(2);
+	});
+
+	it("gives a stream up at once when the page let go while the rule decided", async () => {
+		const harness = await captured(streaming().rule);
+		await harness.run((request) => ({
+			// Playwright takes the redirect of a request that already failed.
+			async continue() {
+				request.failureText = "net::ERR_ABORTED";
+			},
+		}));
+		expect(harness.streams.sessions).toBe(0);
+		expect(harness.timeline.last()?.meta).toEqual({
+			reason: "network",
+			error: "net::ERR_ABORTED",
+		});
+	});
+
+	it("gives up the streams of a context as it is detached, and only those", async () => {
+		const harness = await attached(streaming().rule);
+		const other = createFakeContext();
+		const second = attachmentOf("c2", other);
+		await harness.router.attach(second);
+		await harness.context.dispatch("http://app.test/api/a");
+		await other.dispatch("http://app.test/api/b");
+		expect(harness.streams.sessions).toBe(2);
+		await harness.router.detach(harness.attachment);
+		expect(harness.streams.sessions).toBe(1);
+		expect(harness.timeline.last()).toMatchObject({
+			context: "c1",
+			meta: { reason: "unreached", error: "the context was detached first" },
+		});
+		await harness.router.detach(second);
+		expect(harness.streams.sessions).toBe(0);
+	});
+
+	it("does not wait for a stream the browser brought before the redirect returned", async () => {
+		const { opened, rule: over } = streaming();
+		const harness = await captured(over);
+		let reading: Promise<Response> | undefined;
+		await harness.run({
+			async continue(options) {
+				// Chromium can reach the stream server before Playwright answers.
+				reading = fetch(options?.url as string);
+				await vi.waitFor(() => expect(opened).toHaveLength(1));
+			},
+		});
+		await harness.clock.advance(TIMEOUT_MS);
+		await opened[0]?.write("on time");
+		const response = await reading;
+		await opened[0]?.end();
+		expect(await response?.text()).toBe("on time");
+		// Its end, and no giving up on it.
+		expect(harness.timeline.frames().map((f) => f.meta["reason"])).toEqual([
+			undefined,
+			undefined,
+		]);
+	});
+
 	it("disposes the session when the redirect fails", async () => {
 		const harness = await captured(streaming().rule);
-		vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		const error = vi.spyOn(harness.log, "error").mockImplementation(() => {});
 		const fulfill = vi.fn().mockResolvedValue(undefined);
 		await harness.run({
 			fulfill,
 			continue: vi.fn().mockRejectedValue(new Error("page closed")),
 		});
-		// The session is forgotten, and the page gets a 500 instead of a hang.
 		expect(harness.streams.sessions).toBe(0);
-		expect(fulfill).toHaveBeenCalledWith(
-			expect.objectContaining({ status: 500 }),
+		// The failed redirect was the route's one answer: the 500 is refused,
+		// and said so at error, since the page is left waiting.
+		expect(fulfill).not.toHaveBeenCalled();
+		expect(error).toHaveBeenCalledWith(
+			"could not answer a failed rule: the request is left without an answer",
+			{ rule: "test rule", url: "http://app.test/api/x" },
+			expect.objectContaining({ message: "Route is already handled!" }),
 		);
 	});
 });
@@ -846,6 +1304,99 @@ describe("http router: failures stay inside", () => {
 		expect(
 			second.outcome.kind === "fulfill" && second.outcome.body.toString(),
 		).toContain("not an Error");
+	});
+
+	it("answers the rule's 500 for an answer Playwright or Chromium would refuse", async () => {
+		const answers: [string, HttpRule["handle"], string][] = [
+			[
+				"continue to another scheme",
+				() => ({ type: "continue", url: "https://app.test/api/x" }),
+				"continue cannot change the scheme (http: to https:): Playwright rewrites a URL within its scheme only",
+			],
+			[
+				"continue to no URL at all",
+				() => ({ type: "continue", url: "http://[" }),
+				"Invalid URL",
+			],
+			[
+				"continue with a broken header",
+				() => ({ type: "continue", headers: { "x-a": "a\nb" } }),
+				'the value of header "x-a" has a line break or NUL in it',
+			],
+			[
+				"abort with a code Playwright does not know",
+				() => ({ type: "abort", error: "bogus" as never }),
+				'"bogus" is not an abort error code; Playwright takes aborted, accessdenied, addressunreachable, blockedbyclient, blockedbyresponse, connectionaborted, connectionclosed, connectionfailed, connectionrefused, connectionreset, internetdisconnected, namenotresolved, timedout, failed',
+			],
+			[
+				"fulfill with a header name that is not a token",
+				() => ({ type: "fulfill", headers: { "x bad": "1" } }),
+				'"x bad" is not a valid header name',
+			],
+			[
+				"fulfill with a CR in a value",
+				() => ({ type: "fulfill", headers: { "x-a": "a\rb" } }),
+				'the value of header "x-a" has a line break or NUL in it',
+			],
+			[
+				"fulfill with a NUL in a cookie",
+				() => ({ type: "fulfill", headers: { "set-cookie": "a=1\nb=\u0000" } }),
+				'the value of header "set-cookie" has a line break or NUL in it',
+			],
+		];
+		for (const [label, handle, message] of answers) {
+			const harness = await attached({ label, handle });
+			vi.spyOn(harness.log, "error").mockImplementation(() => {});
+			// Checked before the route is touched: Playwright marks a route
+			// handled before it checks the answer, and the page would hang.
+			const { outcome } = await harness.context.dispatch(
+				"http://app.test/api/x",
+			);
+			expect(outcome).toMatchObject({ kind: "fulfill", status: 500 });
+			expect(outcome.kind === "fulfill" && outcome.body.toString()).toBe(
+				`wirestage: rule "${label}" failed: ${message}`,
+			);
+			expect(harness.timeline.last()?.meta).toEqual({
+				reason: "rule-error",
+				error: message,
+			});
+		}
+	});
+
+	it("continues to a URL relative to the request", async () => {
+		const { context } = await attached({
+			handle: () => ({ type: "continue", url: "v2/thing?q=1" }),
+		});
+		expect((await context.dispatch("http://app.test/api/x")).outcome).toEqual({
+			kind: "continue",
+			options: { url: "http://app.test/api/v2/thing?q=1" },
+		});
+	});
+
+	it("folds a header's several values into one, but sends set-cookie's a line each", async () => {
+		const { context, timeline } = await attached({
+			handle: () => ({
+				type: "fulfill",
+				headers: {
+					vary: "origin\naccept",
+					"set-cookie": "a=1; Path=/\nb=2; Path=/",
+				},
+				body: "ok",
+			}),
+		});
+		const page = context.newPage();
+		const response = await context.fetch({ page })("http://app.test/api/x");
+		// Chromium drops a fulfilled response with a newline in any other
+		// header, and the request hangs; HTTP joins repeated ones this way.
+		expect(response.headers.get("vary")).toBe("origin, accept");
+		expect(response.headers.getSetCookie()).toEqual([
+			"a=1; Path=/",
+			"b=2; Path=/",
+		]);
+		expect(timeline.last()?.meta["headers"]).toEqual({
+			vary: "origin, accept",
+			"set-cookie": "a=1; Path=/\nb=2; Path=/",
+		});
 	});
 
 	it("answers 500 when a rule's match or endpoint throws, instead of hanging", async () => {
@@ -890,20 +1441,28 @@ describe("http router: failures stay inside", () => {
 		]);
 	});
 
-	it("swallows the second failure when even the 500 cannot be sent", async () => {
+	it("says at error when even the 500 cannot be sent, and at debug once detached", async () => {
 		const harness = await captured({
 			handle: () => {
 				throw new Error("x");
 			},
 		});
 		const debug = vi.spyOn(harness.log, "debug").mockImplementation(() => {});
-		vi.spyOn(harness.log, "error").mockImplementation(() => {});
-		await harness.run({
-			fulfill: vi.fn().mockRejectedValue(new Error("already answered")),
-		});
-		expect(debug).toHaveBeenCalledWith(
-			"could not answer a failed rule",
-			{},
+		const error = vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		const refused = vi.fn().mockRejectedValue(new Error("Target closed"));
+		await harness.run({ fulfill: refused });
+		// Never rejected to Playwright; the page is left waiting, so it is an
+		// error, not a debug line.
+		expect(error).toHaveBeenLastCalledWith(
+			"could not answer a failed rule: the request is left without an answer",
+			{ rule: "test rule", url: "http://app.test/api/x" },
+			expect.any(Error),
+		);
+		await harness.router.detach(harness.attachment);
+		await harness.run({ fulfill: refused });
+		expect(debug).toHaveBeenLastCalledWith(
+			"could not answer a failed rule: the request is left without an answer",
+			{ rule: "test rule", url: "http://app.test/api/x" },
 			expect.any(Error),
 		);
 	});

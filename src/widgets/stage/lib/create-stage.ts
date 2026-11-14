@@ -93,6 +93,8 @@ export function createStage<const Plugins extends readonly AnyWirePlugin[]>(
 		streams: streamServer,
 		pageId,
 		correlation: createSequence("x"),
+		clock,
+		timeoutMs: options.pageTimeoutMs ?? 2_000,
 	});
 	const sockets = createSocketRouter({
 		timeline,
