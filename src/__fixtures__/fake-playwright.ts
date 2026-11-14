@@ -9,10 +9,16 @@
  *   `requestfailed` (aborted), with the route's answer as its response;
  * - `continue({ url })` really sends the request there, so the stream server
  *   is exercised over a real socket;
- * - a binding name can be exposed once per context;
+ * - a binding name can be exposed once per context; once removed, it is gone
+ *   from every document, and a document that kept a reference to it gets a
+ *   synchronous throw — while a binding that throws in Node rejects;
  * - every frame is its own realm: init scripts run in each, and a function
  *   passed to `evaluate` is serialized and rebuilt there, so one that leans
  *   on module scope fails here as it would in a browser;
+ * - a navigation fires `beforeunload`, then `pagehide`, and what a document
+ *   sends through a binding from `pagehide` on never arrives — Chromium
+ *   loses it when the main frame navigates — while closing a page or
+ *   removing an iframe fires `pagehide` and delivers;
  * - cookies are scoped: `cookies(url)` returns only those the URL would send;
  * - a WebSocket's ends pass messages on and close the way Playwright's do:
  *   see `createFakeWebSocketRoute`.
@@ -125,10 +131,17 @@ type Listener = (value?: unknown) => void;
 type Scope = Record<string, unknown> & EventTarget;
 
 export interface FakeFrame extends FramePort {
+	/** The global of the frame's current document. */
 	readonly scope: Scope;
 	/** Run the context's init scripts in this frame's scope, as a navigation would. */
 	load(): void;
-	/** The frame is gone: `evaluate` fails, as on a detached frame. */
+	/**
+	 * Load a new document, as a navigation does: `beforeunload`, then
+	 * `pagehide` — from which the old document's binding calls are lost —
+	 * then the init scripts in a fresh realm.
+	 */
+	navigate(): void;
+	/** The frame is removed: `pagehide`, then `evaluate` fails, as on a detached frame. */
 	detach(): void;
 }
 
@@ -137,6 +150,9 @@ export interface FakePage extends PagePort {
 	readonly scope: Scope;
 	/** Load the main frame. */
 	load(): void;
+	/** The main frame navigates. */
+	navigate(): void;
+	/** `pagehide` in every frame, then closed. */
 	close(): void;
 	/** Add an iframe: a realm of its own, with the same bindings and scripts. */
 	addFrame(): FakeFrame;
@@ -360,6 +376,8 @@ export function createFakeContext(
 			if (handle !== undefined)
 				handle.dispose = async () => {
 					bindings.delete(name);
+					for (const page of pages)
+						for (const frame of page.frames()) delete frame.scope[name];
 				};
 			return handle;
 		},
@@ -563,10 +581,12 @@ export function createFakePage(context: FakeContext): FakePage {
 	let closed = false;
 	const frames: FakeFrame[] = [];
 	const addFrame = (): FakeFrame => {
-		const scope = new EventTarget() as Scope;
+		let scope = new EventTarget() as Scope;
 		let detached = false;
 		const frame: FakeFrame = {
-			scope,
+			get scope() {
+				return scope;
+			},
 			async evaluate(pageFunction, arg) {
 				if (closed || detached)
 					throw new Error("Target page, context or browser has been closed");
@@ -581,13 +601,31 @@ export function createFakePage(context: FakeContext): FakePage {
 				return rebuilt(arg as never);
 			},
 			load() {
+				const document = scope;
 				for (const [name, binding] of context.bindings)
-					scope[name] = (message: unknown) =>
-						Promise.resolve(binding({ page }, message));
+					document[name] = (message: unknown) => {
+						// Like Playwright's: removed, it throws, and synchronously.
+						if (context.bindings.get(name) !== binding)
+							throw new Error(`binding "${name}" has been removed`);
+						// A document that navigated away is gone, and its call with it.
+						if (document !== scope) return new Promise(() => {});
+						// A binding that throws in Node rejects in the page.
+						return new Promise((resolve) =>
+							resolve(binding({ page }, message)),
+						);
+					};
 				for (const content of context.scripts)
-					new Function("globalThis", content)(scope);
+					new Function("globalThis", content)(document);
+			},
+			navigate() {
+				const leaving = scope;
+				leaving.dispatchEvent(new Event("beforeunload"));
+				scope = new EventTarget() as Scope;
+				leaving.dispatchEvent(new Event("pagehide"));
+				frame.load();
 			},
 			detach() {
+				scope.dispatchEvent(new Event("pagehide"));
 				detached = true;
 			},
 		};
@@ -600,12 +638,17 @@ export function createFakePage(context: FakeContext): FakePage {
 		},
 		isClosed: () => closed,
 		close() {
+			for (const frame of frames)
+				frame.scope.dispatchEvent(new Event("pagehide"));
 			closed = true;
 		},
 		frames: () => frames,
 		addFrame,
 		load() {
 			main.load();
+		},
+		navigate() {
+			main.navigate();
 		},
 	};
 	const main = addFrame();

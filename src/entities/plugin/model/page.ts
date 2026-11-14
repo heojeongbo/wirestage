@@ -17,7 +17,12 @@ export interface PageEntry {
 export interface PageModuleEnv<State = unknown, Config = unknown> {
 	readonly window: Window & typeof globalThis;
 	readonly config: Config;
-	/** Queue an entry. Entries are batched and flushed to Node. */
+	/**
+	 * Queue an entry. Entries are batched and flushed to Node: a document
+	 * that navigates sends what it holds on `beforeunload`, one that closes
+	 * (or an iframe removed) on `pagehide`. What it emits after that, on its
+	 * way out, can be lost.
+	 */
 	emit(entry: PageEntry): void;
 	/** The page's epoch-millisecond clock. */
 	now(): number;
@@ -30,12 +35,16 @@ export interface PageModuleEnv<State = unknown, Config = unknown> {
 	/**
 	 * Receive the module's state: shortly after load (it comes from Node, so
 	 * the document's first script may run before it), and on every change.
+	 * One that throws does not keep the state from the others: it is logged
+	 * in Node, or fails the `refresh()` that sent the state.
 	 */
 	onState(handler: (state: State) => void): void;
 	/**
 	 * Undo what `install` did to the page: put back what was wrapped. Runs
 	 * when the stage detaches, so a document that outlives the stage is left
-	 * as the stage found it.
+	 * as the stage found it — and in a document the detach did not reach, as
+	 * soon as the runtime finds the binding gone. One that throws does not
+	 * stop the others, and is logged in Node while the binding lasts.
 	 */
 	onDetach(handler: () => void): void;
 }
@@ -44,7 +53,8 @@ export interface PageModuleEnv<State = unknown, Config = unknown> {
  * Runs INSIDE the page, so it is serialized with `Function.prototype.toString`.
  * It must be self-contained — no imports, no closure over module scope — and
  * declared with `function`, since an object-method body does not serialize to
- * a valid expression.
+ * a valid expression. `register` refuses one whose source is not a function
+ * expression: a method, a bound or a native function.
  */
 export type PageInstaller<State = unknown, Config = unknown> = (
 	env: PageModuleEnv<State, Config>,
@@ -73,6 +83,11 @@ export interface PageModule<State = unknown, Config = unknown> {
  * binding back to Node.
  */
 export interface PageHost {
+	/**
+	 * Add a module to the init script. Throws `INVALID_ARGUMENT` for an id
+	 * already taken or an installer that does not serialize to a function
+	 * expression, and `INVALID_STATE` once the stage has been attached.
+	 */
 	register<State, Config>(module: PageModule<State, Config>): void;
 	/**
 	 * Run a module's command handler in every frame of every open page (or of

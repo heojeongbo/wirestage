@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createFakeContext } from "../../../__fixtures__/fake-playwright.js";
 import {
 	buildPageScript,
 	commandRuntime,
@@ -14,6 +15,16 @@ type Scope = Record<string, unknown> & EventTarget;
 
 const BINDING = "__wirestage_test";
 
+/** The entry types of each batch sent so far. */
+const batchesOf = (sent: readonly unknown[]) =>
+	sent
+		.filter((m) => (m as { type: string }).type === "entries")
+		.map((m) =>
+			(m as { entries: { entry: { type: string } }[] }).entries.map(
+				(e) => e.entry.type,
+			),
+		);
+
 function scopeWith(
 	reply: (message: unknown) => Promise<unknown> = async () => undefined,
 ) {
@@ -23,16 +34,33 @@ function scopeWith(
 		sent.push(message);
 		return reply(message);
 	};
-	/** The entry types of each batch sent so far. */
-	const batches = () =>
-		sent
-			.filter((m) => (m as { type: string }).type === "entries")
-			.map((m) =>
-				(m as { entries: { entry: { type: string } }[] }).entries.map(
-					(e) => e.entry.type,
-				),
-			);
-	return { scope, sent, batches };
+	return { scope, sent, batches: () => batchesOf(sent) };
+}
+
+/**
+ * A page of the fake context, holding the runtime's binding: it records what
+ * arrives, and the page navigates, closes, or loses the binding the way a
+ * Playwright page does (`fake-playwright.ts`).
+ */
+async function pageWith(
+	reply: (message: unknown) => unknown = () => undefined,
+) {
+	const context = createFakeContext({ disposables: true });
+	const sent: unknown[] = [];
+	const exposed = (await context.exposeBinding(BINDING, (_source, message) => {
+		sent.push(message);
+		return reply(message);
+	})) as { dispose(): Promise<void> };
+	const page = context.newPage();
+	page.load();
+	return {
+		page,
+		/** The first document's global: the runtime under test lives there. */
+		scope: page.scope,
+		sent,
+		batches: () => batchesOf(sent),
+		removeBinding: () => exposed.dispose(),
+	};
 }
 
 const init = (
@@ -60,10 +88,7 @@ interface TestEnv {
 }
 
 /** Start a runtime with one module, and hand back that module's env. */
-function start(
-	harness: ReturnType<typeof scopeWith>,
-	flushMs?: number,
-): TestEnv {
+function start(harness: { readonly scope: Scope }, flushMs?: number): TestEnv {
 	let env: TestEnv | undefined;
 	pageRuntime(harness.scope, init([{ id: "m", config: { a: 1 } }], flushMs), {
 		m: (e) => {
@@ -139,16 +164,130 @@ describe("page runtime", () => {
 		expect(harness.batches()).toEqual([["now"], ["later"]]);
 	});
 
-	it("flushes what it holds when the page is hidden", async () => {
-		const harness = scopeWith(async (message) => {
+	it("sends what it holds before the page navigates away", async () => {
+		const harness = await pageWith();
+		const env = start(harness, 10_000);
+		env.emit({ type: "sent at once" });
+		env.emit({ type: "held" });
+		// A call made from `pagehide` is lost when the main frame navigates;
+		// only `beforeunload` can carry what is held.
+		harness.page.navigate();
+		expect(harness.batches()).toEqual([["sent at once"], ["held"]]);
+	});
+
+	it("sends what it holds when the page closes or its iframe is removed", async () => {
+		// Neither fires `beforeunload`; `pagehide`'s call arrives — and a
+		// binding that fails as the page goes is no error of the page's.
+		const harness = await pageWith((message) => {
 			if ((message as { type: string }).type === "entries")
-				throw new Error("unloading");
+				throw new Error("closing");
 		});
 		const env = start(harness, 10_000);
 		env.emit({ type: "sent at once" });
 		env.emit({ type: "held" });
-		harness.scope.dispatchEvent(new Event("pagehide"));
+		harness.page.close();
 		expect(harness.batches()).toEqual([["sent at once"], ["held"]]);
+
+		const framed = await pageWith();
+		const iframe = framed.page.addFrame();
+		iframe.load();
+		const inFrame = start(iframe, 10_000);
+		inFrame.emit({ type: "sent at once" });
+		inFrame.emit({ type: "held" });
+		iframe.detach();
+		expect(framed.batches()).toEqual([["sent at once"], ["held"]]);
+	});
+
+	it("steps aside when its binding is taken away, and never throws into the page", async () => {
+		const harness = await pageWith();
+		const undone: string[] = [];
+		const envs: TestEnv[] = [];
+		pageRuntime(
+			harness.scope,
+			init(
+				[
+					{ id: "a", config: null },
+					{ id: "b", config: null },
+				],
+				0,
+			),
+			{
+				a: (e) => {
+					envs.push(e as TestEnv);
+					(e as TestEnv).onDetach(() => undone.push("a"));
+				},
+				b: (e) => {
+					(e as TestEnv).onDetach(() => {
+						throw new Error("b could not undo");
+					});
+				},
+			},
+		);
+		const [env] = envs as [TestEnv];
+		env.emit({ type: "before" });
+		// What a document the stage's detach did not reach is left with:
+		// Playwright's binding, removed, throws on the next call.
+		await harness.removeBinding();
+		// The app's own call (a wrapped `send()`) goes through untouched.
+		expect(() => env.emit({ type: "after" })).not.toThrow();
+		// Every module is undone, even past one that fails to, and the runtime
+		// is gone: nothing can reach Node any more.
+		expect(undone).toEqual(["a"]);
+		expect(handleOf(harness.scope)).toBeUndefined();
+		env.emit({ type: "later" });
+		expect(harness.batches()).toEqual([["before"]]);
+		expect(harness.sent).not.toContainEqual(
+			expect.objectContaining({ type: "failure" }),
+		);
+	});
+
+	it("gives every module its state when a handler throws, and tells Node", async () => {
+		const states: unknown[] = [];
+		const { scope, sent } = scopeWith(async (message) => {
+			const { type } = message as { type: string };
+			// A report that does not get through is not the page's error either.
+			if (type === "failure") throw new Error("binding gone");
+			return type === "hello" ? { broken: "boot", fine: "boot" } : undefined;
+		});
+		pageRuntime(
+			scope,
+			init([
+				{ id: "broken", config: null },
+				{ id: "fine", config: null },
+			]),
+			{
+				broken: (e) => {
+					const env = e as TestEnv;
+					env.onState(() => {
+						throw new Error("bug in a state handler");
+					});
+					env.onState((state) => states.push(["broken", state]));
+				},
+				fine: (e) => {
+					(e as TestEnv).onState((state) => states.push(["fine", state]));
+				},
+			},
+		);
+		// Neither the module's next handler nor the next module is starved,
+		// and nothing is left to reject unhandled in the page.
+		await vi.waitFor(() =>
+			expect(states).toEqual([
+				["broken", "boot"],
+				["fine", "boot"],
+			]),
+		);
+		expect(sent).toContainEqual({
+			type: "failure",
+			module: "broken",
+			handler: "onState",
+			error: "Error: bug in a state handler",
+		});
+		// A state sent by `refresh()` reaches every handler too, and the
+		// failure fails the command, as any handler's does.
+		expect(() => handleOf(scope)?.command("broken", "__state", "live")).toThrow(
+			"bug in a state handler",
+		);
+		expect(states.at(-1)).toEqual(["broken", "live"]);
 	});
 
 	it("installs once per realm and needs the binding", () => {
@@ -285,8 +424,15 @@ describe("page runtime", () => {
 		envs[0]?.emit({ type: "sent at once" });
 		envs[0]?.emit({ type: "held" });
 		await handleOf(harness.scope)?.detach();
-		// One module failing to undo does not keep the others hooked.
+		// One module failing to undo does not keep the others hooked, and Node
+		// hears which one it was.
 		expect(undone).toEqual(["b again", "b", "a"]);
+		expect(harness.sent).toContainEqual({
+			type: "failure",
+			module: "b",
+			handler: "onDetach",
+			error: "Error: b could not undo",
+		});
 		expect(harness.batches()).toEqual([["sent at once"], ["held"]]);
 		// The runtime has stepped aside: no handle, and a module that keeps
 		// emitting is talking to nobody.

@@ -24,6 +24,14 @@ export type RuntimeMessage =
 				readonly module: string;
 				readonly entry: unknown;
 			}[];
+	  }
+	| {
+			/** A module's own handler threw, with no call to reject: Node logs it. */
+			readonly type: "failure";
+			readonly module: string;
+			/** `onState` or `onDetach`. */
+			readonly handler: string;
+			readonly error: string;
 	  };
 
 /** What the runtime publishes on `globalThis.__wirestage[binding]`. */
@@ -54,6 +62,10 @@ type Installer = (env: unknown) => void;
  * `flush()` returns the binding's promise, so a Node-side `evaluate(flush)`
  * resolves only after Node has appended the entries: a read that flushes
  * first sees everything the page recorded before it.
+ *
+ * Nothing the runtime does throws into the page's own code: a module whose
+ * handler throws is reported to Node, and a binding that has been taken away
+ * makes the runtime step aside.
  */
 export function pageRuntime(
 	scope: Record<string, unknown>,
@@ -66,19 +78,57 @@ export function pageRuntime(
 	// Init scripts run again in every frame and on every navigation; a second
 	// run in the same realm would double every entry.
 	if (root[init.binding] !== undefined || typeof bind !== "function") return;
-	const send = bind as (message: unknown) => Promise<unknown>;
+	const send = bind as (message: RuntimeMessage) => Promise<unknown>;
 
 	const queue: { module: string; entry: unknown }[] = [];
-	/** Set by `detach`: a module that keeps emitting is talking to nobody. */
+	/** Set once the runtime steps aside: a module still emitting talks to nobody. */
 	let detached = false;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	/** When the last batch left; far enough back that the first entry is not held. */
 	let sentAt = Number.NEGATIVE_INFINITY;
 	const commands = new Map<string, (args: unknown) => unknown>();
 	const stateHandlers = new Map<string, ((state: unknown) => void)[]>();
-	const detachHandlers: (() => void)[] = [];
+	const detachHandlers: { readonly module: string; undo(): void }[] = [];
 
 	const now = () => performance.timeOrigin + performance.now();
+	/** Undo every module's hooks, newest first: stacked hooks come off in order. */
+	const unhook = () => {
+		for (const { module, undo } of detachHandlers.splice(0).reverse()) {
+			try {
+				undo();
+			} catch (error) {
+				// One module failing to undo must not keep the rest hooked.
+				report(module, "onDetach", error);
+			}
+		}
+		delete root[init.binding];
+	};
+	/**
+	 * Send through the binding. Playwright's throws, synchronously, once it
+	 * has been removed — in a document the stage's detach did not reach, one
+	 * that loaded while the stage was detaching. Thrown on from `emit`, that
+	 * would fail the app's own call (`RTCDataChannel.send()`) or surface as a
+	 * page error; nothing the runtime holds can reach Node any more, so it
+	 * steps aside instead, putting back what the modules wrapped.
+	 */
+	const post = (message: RuntimeMessage): Promise<unknown> => {
+		try {
+			return send(message);
+		} catch {
+			detached = true;
+			queue.length = 0;
+			unhook();
+			return Promise.resolve(undefined);
+		}
+	};
+	/** Tell Node a module's handler threw, so it is logged against the module. */
+	const report = (module: string, handler: string, error: unknown) => {
+		// Stepping aside for want of a binding: there is nobody left to tell.
+		if (detached) return;
+		post({ type: "failure", module, handler, error: String(error) }).catch(
+			() => {},
+		);
+	};
 	const flush = (): Promise<unknown> => {
 		if (timer !== undefined) {
 			clearTimeout(timer);
@@ -86,7 +136,7 @@ export function pageRuntime(
 		}
 		if (queue.length === 0) return Promise.resolve(undefined);
 		sentAt = now();
-		return send({ type: "entries", entries: queue.splice(0, queue.length) });
+		return post({ type: "entries", entries: queue.splice(0, queue.length) });
 	};
 	const schedule = () => {
 		const wait = sentAt + init.flushMs - now();
@@ -112,8 +162,16 @@ export function pageRuntime(
 		for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
 		return out;
 	};
-	const applyState = (module: string, state: unknown) => {
-		for (const handler of stateHandlers.get(module) ?? []) handler(state);
+	/** Run each of a module's state handlers, whatever the others do; return what threw. */
+	const applyState = (module: string, state: unknown): unknown[] => {
+		const failures: unknown[] = [];
+		for (const handler of stateHandlers.get(module) ?? [])
+			try {
+				handler(state);
+			} catch (error) {
+				failures.push(error);
+			}
+		return failures;
 	};
 
 	for (const module of init.modules) {
@@ -141,7 +199,7 @@ export function pageRuntime(
 					stateHandlers.set(module.id, list);
 				},
 				onDetach: (handler: () => void) => {
-					detachHandlers.push(handler);
+					detachHandlers.push({ module: module.id, undo: handler });
 				},
 			});
 		} catch (error) {
@@ -155,36 +213,40 @@ export function pageRuntime(
 		flush,
 		command(module, op, args) {
 			if (op === "__state") {
-				applyState(module, args);
+				// Every handler gets the state; the command still fails when one
+				// threw, so the `refresh()` that sent it says which module broke.
+				const failures = applyState(module, args);
+				if (failures.length > 0) throw failures[0];
 				return true;
 			}
 			const handler = commands.get(`${module}\u0000${op}`);
 			return handler === undefined ? undefined : handler(args);
 		},
 		detach() {
-			// Newest first, so hooks stacked on one another come off in order.
-			for (const undo of detachHandlers.splice(0).reverse()) {
-				try {
-					undo();
-				} catch {
-					// One module failing to undo must not keep the rest hooked.
-				}
-			}
-			delete root[init.binding];
+			unhook();
+			// After the undos: what they emit still leaves with the last flush.
 			detached = true;
 			return flush();
 		},
 	};
 	root[init.binding] = handle;
-	(scope as unknown as EventTarget).addEventListener("pagehide", () => {
-		flush().catch(() => {});
-	});
-	send({ type: "hello" }).then(
+	// Chromium loses a binding call made from `pagehide` when the main frame
+	// navigates — the document is gone before Node hears of it — while one
+	// made from `beforeunload` still arrives. `pagehide` stays for the ways
+	// out that fire no `beforeunload`: a page closed, an iframe removed.
+	for (const type of ["beforeunload", "pagehide"])
+		(scope as unknown as EventTarget).addEventListener(type, () => {
+			flush().catch(() => {});
+		});
+	post({ type: "hello" }).then(
 		(states) => {
 			const byModule = (states ?? {}) as Record<string, unknown>;
 			for (const module of stateHandlers.keys())
 				if (byModule[module] !== undefined)
-					applyState(module, byModule[module]);
+					// No call to fail: Node hears of each failure, and the
+					// modules after this one still get their state.
+					for (const error of applyState(module, byModule[module]))
+						report(module, "onState", error);
 		},
 		() => {},
 	);

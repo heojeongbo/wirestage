@@ -30,9 +30,10 @@ export interface PageHostDeps {
 	/** How long entries may wait for company before a batch leaves. */
 	readonly flushMs: number;
 	/**
-	 * How long a frame may take to answer a flush or a command. A frame that
-	 * takes longer is passed over, not waited for: a page stuck behind an
-	 * open dialog must not stall every read of the timeline.
+	 * How long a frame may take to answer a flush or a command, and Playwright
+	 * to take the binding or the init script out at detach. Whatever takes
+	 * longer is passed over, not waited for: a page stuck behind an open
+	 * dialog must not stall every read of the timeline, nor the teardown.
 	 */
 	readonly timeoutMs: number;
 }
@@ -51,11 +52,19 @@ type MaybeDisposable = { dispose?: () => Promise<void> } | undefined;
 interface Installed {
 	/** The attachment its entries belong to; none while detached. */
 	current: AttachedContext | undefined;
-	/** Takes the binding and the init script back out, where Playwright can. */
-	readonly undo: (() => Promise<void>)[];
-	/** False when this Playwright returned nothing to take them out with. */
-	removable: boolean;
+	/**
+	 * Take the binding and the init script back out. Unset until each is in,
+	 * and where this Playwright returned nothing to take them out with.
+	 */
+	removeBinding?: () => Promise<void>;
+	removeScript?: () => Promise<void>;
 }
+
+/** How to take a hook back out, where this Playwright can. */
+const remover = (handle: MaybeDisposable) =>
+	handle?.dispose === undefined
+		? undefined
+		: () => (handle.dispose as () => Promise<void>)();
 
 /**
  * Node half of the page host: one binding and one init script per context,
@@ -90,6 +99,32 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 	};
 
 	/**
+	 * `work`'s value, or undefined once `timeoutMs` have passed — with `late`
+	 * logged, and the work left to finish on its own.
+	 */
+	const inTime = async <T>(
+		work: Promise<T>,
+		late: string,
+	): Promise<{ readonly value: T } | undefined> => {
+		const waiting = new AbortController();
+		try {
+			return await Promise.race([
+				work.then((value) => ({ value })),
+				deps.clock.sleep(timeoutMs, waiting.signal).then(
+					() => {
+						deps.log.warn(late, { timeoutMs });
+						return undefined;
+					},
+					// The work finished first.
+					() => undefined,
+				),
+			]);
+		} finally {
+			waiting.abort();
+		}
+	};
+
+	/**
 	 * Evaluate in one frame, within the time a frame is given. A frame that
 	 * is navigating or gone has nothing to say, which is not a failure.
 	 */
@@ -98,30 +133,36 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 		pageFunction: (arg: Arg) => Result | Promise<Result>,
 		arg: Arg,
 		what: string,
-	): Promise<{ readonly answer: Awaited<Result> } | undefined> => {
-		const waiting = new AbortController();
+	): Promise<{ readonly value: Awaited<Result> } | undefined> => {
 		try {
-			return await Promise.race([
-				frame
-					.evaluate(pageFunction, arg)
-					.then((answer) => ({ answer: answer as Awaited<Result> })),
-				deps.clock.sleep(timeoutMs, waiting.signal).then(
-					() => {
-						deps.log.warn(
-							`a frame did not answer a ${what} in time and was passed over; what it recorded may be missing (is a dialog open?)`,
-							{ timeoutMs },
-						);
-						return undefined;
-					},
-					// The frame answered first.
-					() => undefined,
-				),
-			]);
+			return await inTime(
+				frame.evaluate(pageFunction, arg) as Promise<Awaited<Result>>,
+				`a frame did not answer a ${what} in time and was passed over; what it recorded may be missing (is a dialog open?)`,
+			);
 		} catch (error) {
 			deps.log.debug(`${what} skipped`, {}, error);
 			return undefined;
-		} finally {
-			waiting.abort();
+		}
+	};
+
+	/**
+	 * Take the binding or the init script back out, within the same time.
+	 * Playwright's `dispose()` reaches every page of the context, and a page
+	 * with a dialog open answers nothing until the dialog closes: a detach
+	 * that waited for it would hang the test's teardown.
+	 */
+	const release = async (
+		remove: () => Promise<void>,
+		what: string,
+	): Promise<void> => {
+		try {
+			await inTime(
+				remove(),
+				`the page ${what} was not taken out in time; detaching goes on, and Playwright removes it once the page responds (is a dialog open?)`,
+			);
+		} catch (error) {
+			// A context that closed first took it with it.
+			deps.log.debug("page hook already gone", {}, error);
 		}
 	};
 
@@ -136,6 +177,14 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 			return states;
 		}
 		const page = deps.pageId(source.page);
+		if (message.type === "failure") {
+			deps.log.error(
+				`page module failed in its ${message.handler} handler`,
+				{ module: message.module, page },
+				message.error,
+			);
+			return undefined;
+		}
 		const byModule = new Map<string, PageEntry[]>();
 		for (const { module, entry } of message.entries) {
 			const list = byModule.get(module) ?? [];
@@ -175,7 +224,7 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 		const failures: string[] = [];
 		for (const result of results) {
 			// No answer, or a frame the init script never ran in.
-			const outcome: CommandResult | undefined = result?.answer;
+			const outcome: CommandResult | undefined = result?.value;
 			if (outcome === undefined) continue;
 			if ("error" in outcome) failures.push(outcome.error);
 			else answers.push(outcome.value);
@@ -202,6 +251,19 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 					"INVALID_ARGUMENT",
 					`page module "${module.id}" is already registered`,
 				);
+			try {
+				// Parsed the way the init script will use it. A source that is
+				// not an expression — a method, a bound or a native function —
+				// is a SyntaxError there that takes every module down with it,
+				// and nothing in Node would say so.
+				new Function(`return (${module.install.toString()});`);
+			} catch (error) {
+				throw new WirestageError(
+					"INVALID_ARGUMENT",
+					`page module "${module.id}" cannot run in the page: its install does not serialize to a function expression (${String(error)}); declare it with \`function\` or as an arrow function, not as an object method or a bound function`,
+					{ cause: error },
+				);
+			}
 			modules.set(module.id, module as PageModule<unknown, unknown>);
 		},
 		async attach(attachment) {
@@ -215,28 +277,20 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 				before.current = attachment;
 				return;
 			}
-			const slot: Installed = {
-				current: attachment,
-				undo: [],
-				removable: true,
-			};
+			const slot: Installed = { current: attachment };
 			installed.set(attachment.context, slot);
-			const keep = (handle: MaybeDisposable) => {
-				if (handle?.dispose === undefined) slot.removable = false;
-				else slot.undo.push(() => (handle.dispose as () => Promise<void>)());
-			};
 			const installers: Record<string, (env: unknown) => void> = {};
 			for (const [id, module] of modules)
 				installers[id] = module.install as (env: unknown) => void;
 			try {
-				keep(
+				slot.removeBinding = remover(
 					(await attachment.context.exposeBinding(binding, (source, message) =>
 						slot.current === undefined
 							? undefined
 							: receive(source, message as RuntimeMessage, slot.current),
 					)) as MaybeDisposable,
 				);
-				keep(
+				slot.removeScript = remover(
 					(await attachment.context.addInitScript({
 						content: buildPageScript(
 							{
@@ -253,6 +307,10 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 				);
 			} catch (error) {
 				installed.delete(attachment.context);
+				// A binding left behind would make the next attach fail with
+				// "already registered".
+				if (slot.removeBinding !== undefined)
+					await release(slot.removeBinding, "binding");
 				throw error;
 			}
 		},
@@ -260,6 +318,19 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 			if (!attachments.delete(attachment)) return;
 			const slot = installed.get(attachment.context);
 			if (slot === undefined) return;
+			const { removeBinding, removeScript } = slot;
+			// A Playwright that cannot take a binding or an init script back
+			// leaves them in the context, switched off; they serve it again if
+			// it is attached again.
+			const removable =
+				removeBinding !== undefined && removeScript !== undefined;
+			if (removable) {
+				installed.delete(attachment.context);
+				// The init script first: a document that loaded while the open
+				// ones were being detached would start a runtime no detach
+				// reaches, and then lose its binding under it.
+				await release(removeScript, "init script");
+			}
 			// Undo the hooks in the documents that are open, and take what they
 			// still hold, while the binding is there to carry it.
 			await Promise.all(
@@ -268,16 +339,7 @@ export function createPageHost(deps: PageHostDeps): PageHostEngine {
 				),
 			);
 			slot.current = undefined;
-			// A Playwright that cannot take a binding or an init script back
-			// leaves them in the context, switched off; they serve it again if
-			// it is attached again.
-			if (!slot.removable) return;
-			installed.delete(attachment.context);
-			for (const undo of slot.undo)
-				await undo().catch((error: unknown) => {
-					// A context that closed first took them with it.
-					deps.log.debug("page hook already gone", {}, error);
-				});
+			if (removable) await release(removeBinding, "binding");
 		},
 		async sync() {
 			if (modules.size === 0) return;

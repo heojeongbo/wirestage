@@ -23,11 +23,12 @@ afterEach(() => vi.restoreAllMocks());
 
 /**
  * Emits one entry at install, echoes commands and state back, and says so
- * when it is undone.
+ * when it is undone. The page records a note with `window.note(text)`.
  */
 function echoInstaller(
 	env: PageModuleEnv<{ mode: string }, { tag: string }>,
 ): void {
+	const win = env.window as unknown as Record<string, unknown>;
 	env.emit({ type: "installed", at: env.now(), text: env.config.tag });
 	env.onCommand("echo", (args: unknown) => args);
 	env.onCommand("fail", () => {
@@ -37,7 +38,25 @@ function echoInstaller(
 		env.emit({ type: "state", at: env.now(), text: state.mode }),
 	);
 	env.onDetach(() => env.emit({ type: "undone", at: env.now() }));
+	win["note"] = (text: string) =>
+		env.emit({ type: "note", at: env.now(), text });
+	env.onDetach(() => {
+		delete win["note"];
+	});
 }
+
+/** A module whose state handler is broken. */
+function brokenStateInstaller(env: PageModuleEnv): void {
+	env.onState(() => {
+		throw new Error("bug in a state handler");
+	});
+}
+
+/** What the page does: `window.note(text)`. */
+const note = (
+	frame: { readonly scope: Record<string, unknown> },
+	text: string,
+) => (frame.scope["note"] as (text: string) => void)(text);
 
 const attachmentOf = (id: string, context: FakeContext): AttachedContext => ({
 	id,
@@ -50,6 +69,7 @@ function setup(
 	options: {
 		disposables?: boolean;
 		clock?: ReturnType<typeof createManualClock>;
+		flushMs?: number;
 	} = {},
 ) {
 	const log = createScopedLogger("Page");
@@ -59,7 +79,7 @@ function setup(
 		clock: options.clock ?? createSystemClock(),
 		pageId: createObjectIds("p"),
 		// Long enough that nothing leaves on a timer: the tests flush.
-		flushMs: 10_000,
+		flushMs: options.flushMs ?? 10_000,
 		timeoutMs: 500,
 	});
 	const received: {
@@ -91,6 +111,11 @@ function setup(
 		/** Every entry received so far, as `page:type`. */
 		seen: () =>
 			received.flatMap((r) => r.entries.map((e) => `${r.page}:${e.type}`)),
+		/** The text of every note received so far. */
+		notes: () =>
+			received.flatMap((r) =>
+				r.entries.filter((e) => e.type === "note").map((e) => e.text),
+			),
 		setMode(next: string) {
 			mode = next;
 		},
@@ -167,6 +192,20 @@ describe("page host", () => {
 		expect(await harness.host.command("echo", "echo", 5)).toEqual([5, 5]);
 	});
 
+	it("keeps what a page held when it navigates, and hooks the next document", async () => {
+		const harness = await attached();
+		const page = harness.context.newPage();
+		page.load();
+		// Both wait behind the flush window, which the navigation cuts short.
+		note(page, "a");
+		note(page, "b");
+		page.navigate();
+		expect(harness.notes()).toEqual(["a", "b"]);
+		note(page, "in the next document");
+		await harness.host.sync();
+		expect(harness.notes()).toEqual(["a", "b", "in the next document"]);
+	});
+
 	it("passes over a frame that is going away", async () => {
 		const harness = await attached();
 		const page = harness.context.newPage();
@@ -232,6 +271,66 @@ describe("page host", () => {
 		await harness.host.detach(harness.attachment);
 	});
 
+	it("refuses an installer the page could not rebuild, naming the module", () => {
+		const { host, module } = setup();
+		const refusal = (install: unknown) => {
+			try {
+				host.register({ ...module, id: "bad", install: install as never });
+			} catch (error) {
+				return error;
+			}
+			return undefined;
+		};
+		// Each serializes to something that is not an expression: in the init
+		// script, a SyntaxError that would take every module down with it.
+		const shorthand = {
+			install(env: PageModuleEnv) {
+				env.emit({ type: "x", at: 0 });
+			},
+		};
+		for (const install of [
+			shorthand.install,
+			echoInstaller.bind(null),
+			Math.max,
+		])
+			expect(refusal(install)).toMatchObject({
+				code: "INVALID_ARGUMENT",
+				message: expect.stringContaining(
+					'page module "bad" cannot run in the page: its install does not serialize to a function expression (SyntaxError',
+				),
+			});
+		// A `function` and an arrow rebuild as they are.
+		host.register({ ...module, id: "declared", install: echoInstaller });
+		host.register({
+			...module,
+			id: "arrow",
+			install: (env) => env.emit({ type: "x", at: 0 }),
+		});
+	});
+
+	it("logs a module's handler that threw in the page, naming the module", async () => {
+		const harness = setup();
+		const error = vi.spyOn(harness.log, "error").mockImplementation(() => {});
+		harness.host.register({
+			...harness.module,
+			id: "broken",
+			install: brokenStateInstaller as PageModule["install"],
+		});
+		harness.host.register(harness.module);
+		await harness.host.attach(harness.attachment);
+		harness.context.newPage().load();
+		await vi.waitFor(() =>
+			expect(error).toHaveBeenCalledWith(
+				"page module failed in its onState handler",
+				{ module: "broken", page: "p1" },
+				"Error: bug in a state handler",
+			),
+		);
+		// The module after it still got its state.
+		await harness.host.sync();
+		expect(harness.seen()).toContain("p1:state");
+	});
+
 	it("seals registration at the first attach and refuses duplicates", async () => {
 		const harness = setup();
 		harness.host.register(harness.module);
@@ -287,8 +386,10 @@ describe("page host: detaching", () => {
 		const page = harness.context.newPage();
 		page.load();
 		await harness.host.detach(harness.attachment);
-		// The module's own undo ran in the page, and its last entry made it out.
-		expect(harness.seen()).toEqual(["p1:installed", "p1:undone"]);
+		// The state the page was sent, held behind the flush window, came out
+		// with the detach; the module's own undo ran, and its last entry too.
+		expect(harness.seen()).toEqual(["p1:installed", "p1:state", "p1:undone"]);
+		expect(page.scope["note"]).toBeUndefined();
 		expect(harness.context.bindings.size).toBe(0);
 		expect(harness.context.scripts).toEqual([]);
 		// A page loaded afterwards is not touched at all.
@@ -298,6 +399,81 @@ describe("page host: detaching", () => {
 		// Detaching twice, or a context never attached, is harmless.
 		await harness.host.detach(harness.attachment);
 		await harness.host.detach(attachmentOf("c9", createFakeContext()));
+	});
+
+	for (const during of ["init script", "binding"] as const)
+		it(`leaves no hooks in a document that loads while the ${during} is taken out`, async () => {
+			const harness = await attached();
+			const page = harness.context.newPage();
+			page.load();
+			const [binding, script] = harness.context.disposables ?? [];
+			const handle = during === "binding" ? binding : script;
+			if (handle === undefined) throw new Error("nothing to take out");
+			const dispose = handle.dispose;
+			vi.spyOn(handle, "dispose").mockImplementation(async () => {
+				page.navigate();
+				await dispose();
+			});
+			await harness.host.detach(harness.attachment);
+			// The init script comes out first: a document after it has no
+			// runtime, and one before it is detached with the rest. Taken out
+			// last, it would hand the reload a runtime whose binding is gone.
+			expect(page.scope["note"]).toBeUndefined();
+			expect(
+				(page.scope["__wirestage"] as Record<string, unknown> | undefined)?.[
+					"__wirestage_s1"
+				],
+			).toBeUndefined();
+		});
+
+	it("lets a document the detach did not reach step aside once the binding is gone", async () => {
+		// No flush window: the page's call goes straight to the binding.
+		const harness = await attached({ flushMs: 0 });
+		const page = harness.context.newPage();
+		page.load();
+		// The detach's evaluate fails there, as in a document being replaced.
+		vi.spyOn(page.frames()[0] as FakeFrame, "evaluate").mockRejectedValueOnce(
+			new Error("Execution context was destroyed"),
+		);
+		vi.spyOn(harness.log, "debug").mockImplementation(() => {});
+		await harness.host.detach(harness.attachment);
+		expect(typeof page.scope["note"]).toBe("function");
+		// The binding it holds now throws; the app's call must not.
+		expect(() => note(page, "after the stage")).not.toThrow();
+		// The runtime undid every module instead, and stepped aside.
+		expect(page.scope["note"]).toBeUndefined();
+		expect(page.scope["__wirestage"]).toEqual({});
+		expect(harness.notes()).toEqual([]);
+	});
+
+	it("does not wait for a page behind a dialog to give its hooks back", async () => {
+		const clock = createManualClock();
+		const harness = await attached({ clock });
+		harness.context.newPage().load();
+		// Playwright's dispose() returns once every page has done its part; a
+		// page behind a dialog does nothing until the dialog is closed.
+		for (const disposable of harness.context.disposables ?? [])
+			vi.spyOn(disposable, "dispose").mockReturnValue(new Promise(() => {}));
+		const warn = vi.spyOn(harness.log, "warn").mockImplementation(() => {});
+		let done = false;
+		void harness.host.detach(harness.attachment).then(() => {
+			done = true;
+		});
+		await clock.advance(500);
+		expect(warn).toHaveBeenCalledWith(
+			expect.stringContaining("the page init script was not taken out in time"),
+			{ timeoutMs: 500 },
+		);
+		expect(done).toBe(false);
+		await clock.advance(500);
+		expect(warn).toHaveBeenCalledWith(
+			expect.stringContaining("the page binding was not taken out in time"),
+			{ timeoutMs: 500 },
+		);
+		expect(done).toBe(true);
+		// The open page was still detached, and nothing is left waiting.
+		expect(harness.seen()).toContain("p1:undone");
+		expect(clock.pending).toBe(0);
 	});
 
 	it("tolerates a context that closed before its hooks could be taken out", async () => {
@@ -348,5 +524,22 @@ describe("page host: detaching", () => {
 		await harness.host.detach(harness.attachment);
 		await harness.host.attach(harness.attachment);
 		expect(harness.context.bindings.size).toBe(1);
+	});
+
+	it("takes the binding back out when the init script cannot go in", async () => {
+		const harness = setup();
+		harness.host.register(harness.module);
+		vi.spyOn(harness.context, "addInitScript").mockRejectedValueOnce(
+			new Error("page crashed"),
+		);
+		await expect(harness.host.attach(harness.attachment)).rejects.toThrow(
+			"page crashed",
+		);
+		expect(harness.context.bindings.size).toBe(0);
+		// Left in, the binding would make this attach fail: "already registered".
+		await harness.host.detach(harness.attachment);
+		await harness.host.attach(harness.attachment);
+		expect(harness.context.bindings.size).toBe(1);
+		expect(harness.context.scripts).toHaveLength(1);
 	});
 });

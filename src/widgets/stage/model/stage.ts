@@ -31,7 +31,8 @@ export interface StageOptions<Plugins extends readonly AnyWirePlugin[]> {
 	readonly pageFlushMs?: number;
 	/**
 	 * How long a page may take to answer a flush or a command before a read
-	 * goes on without it. Default 2000 ms.
+	 * goes on without it — and Playwright to take the page hooks out before a
+	 * detach goes on. Default 2000 ms.
 	 */
 	readonly pageTimeoutMs?: number;
 	/** TLS for live streams on https pages, and the bind host. */
