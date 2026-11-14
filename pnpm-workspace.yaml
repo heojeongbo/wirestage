@@ -1,0 +1,7 @@
+packages:
+  - .
+allowBuilds:
+  # Both postinstalls only check the native binary; the packages already ship
+  # the right one for the platform through optionalDependencies.
+  '@bufbuild/buf': false
+  esbuild: false

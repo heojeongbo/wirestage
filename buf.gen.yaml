@@ -1,0 +1,9 @@
+# Test fixtures only: the generated code is committed under src/__fixtures__
+# (excluded from the build and from coverage). Regenerate with `pnpm gen:proto`.
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: src/__fixtures__/gen
+    opt:
+      - target=ts
+      - import_extension=js

@@ -1,0 +1,6 @@
+{
+	// Type-checked apart from the rest: these files import the package by
+	// name, so they need `dist/` — which `pnpm e2e` builds first.
+	"extends": "../tsconfig.json",
+	"include": ["."]
+}

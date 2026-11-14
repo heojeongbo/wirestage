@@ -1,0 +1,119 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"ignoreUnknown": false,
+		"includes": [
+			"**",
+			"!dist",
+			"!coverage",
+			"!test-results",
+			"!playwright-report",
+			"!perf-results.json"
+		]
+	},
+	"assist": {
+		"actions": {
+			"source": {
+				"organizeImports": {
+					"level": "on",
+					"options": {
+						"groups": [
+							[":NODE:"],
+							":BLANK_LINE:",
+							[":PACKAGE:"],
+							":BLANK_LINE:",
+							[":ALIAS:"],
+							":BLANK_LINE:",
+							[":PATH:"]
+						]
+					}
+				}
+			}
+		}
+	},
+	"formatter": {
+		"enabled": true,
+		"indentStyle": "tab"
+	},
+	"javascript": {
+		"formatter": {
+			"quoteStyle": "double"
+		}
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"complexity": {
+				// It contradicts `noPropertyAccessFromIndexSignature`: the compiler
+				// requires `headers["content-type"]` for index-signature keys, and
+				// Biome has no type information to tell the two cases apart.
+				"useLiteralKeys": "off"
+			},
+			"correctness": {
+				"noUnusedImports": "error"
+			},
+			"suspicious": {
+				// Library output goes through the scoped logger, never `console`.
+				// The overrides below carve out the places where stdout IS the
+				// interface: scripts, benches and config files.
+				"noConsole": "error",
+				"noExplicitAny": "error"
+			},
+			"style": {
+				// Syntax that needs a type-directed emit. tsx, esbuild and vitest
+				// erase types file by file and cannot produce one.
+				"noEnum": "error",
+				"noNamespace": "error",
+				"noParameterProperties": "error",
+				"noRestrictedImports": {
+					"level": "error",
+					"options": {
+						"paths": {
+							"@heojeongbo/log-palette": "Import the logger from src/shared/lib/logger instead. One module owns log-palette, and keeps the library's loggers apart from the process-wide ones."
+						}
+					}
+				}
+			}
+		}
+	},
+	"overrides": [
+		{
+			// Generated protobuf code for the tests: codegen owns the format.
+			"includes": ["**/__fixtures__/gen/**"],
+			"linter": { "enabled": false },
+			"formatter": { "enabled": false },
+			"assist": {
+				"actions": { "source": { "organizeImports": "off" } }
+			}
+		},
+		{
+			"includes": ["src/shared/lib/logger/**"],
+			"linter": {
+				"rules": {
+					"style": { "noRestrictedImports": "off" }
+				}
+			}
+		},
+		{
+			// Terminal programs: stdout is their user interface.
+			"includes": [
+				"scripts/**",
+				"bench/**",
+				"e2e/app/**",
+				"**/*.config.ts",
+				"**/*.config.js"
+			],
+			"linter": {
+				"rules": {
+					"suspicious": { "noConsole": "off" }
+				}
+			}
+		}
+	]
+}

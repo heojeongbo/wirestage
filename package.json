@@ -1,0 +1,141 @@
+{
+	"name": "@heojeongbo/wirestage",
+	"version": "0.1.0",
+	"description": "Record, fake and fault-inject browser wire traffic in Playwright: REST, Connect, gRPC-web, gRPC, SSE, WebSocket and WebRTC data channels on one timeline.",
+	"type": "module",
+	"license": "MIT",
+	"author": "heojeongbo <heojungbo@gmail.com>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/heojeongbo/wirestage.git"
+	},
+	"homepage": "https://github.com/heojeongbo/wirestage#readme",
+	"bugs": "https://github.com/heojeongbo/wirestage/issues",
+	"keywords": [
+		"playwright",
+		"testing",
+		"mock",
+		"grpc-web",
+		"connectrpc",
+		"grpc",
+		"websocket",
+		"webrtc",
+		"datachannel",
+		"sse",
+		"e2e"
+	],
+	"packageManager": "pnpm@11.16.0",
+	"engines": {
+		"node": ">=22.12"
+	},
+	"sideEffects": false,
+	"files": [
+		"dist",
+		"src",
+		"!src/**/*.test.ts",
+		"!src/**/__fixtures__",
+		"README.md",
+		"LICENSE",
+		"LICENSES.md"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./playwright": {
+			"types": "./dist/playwright.d.ts",
+			"default": "./dist/playwright.js"
+		},
+		"./connect": {
+			"types": "./dist/connect.d.ts",
+			"default": "./dist/connect.js"
+		},
+		"./rest": {
+			"types": "./dist/rest.d.ts",
+			"default": "./dist/rest.js"
+		},
+		"./sse": {
+			"types": "./dist/sse.d.ts",
+			"default": "./dist/sse.js"
+		},
+		"./websocket": {
+			"types": "./dist/websocket.d.ts",
+			"default": "./dist/websocket.js"
+		},
+		"./webrtc": {
+			"types": "./dist/webrtc.d.ts",
+			"default": "./dist/webrtc.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+		"build": "pnpm clean && tsc -p tsconfig.build.json",
+		"type:check": "tsc --noEmit",
+		"lint": "biome check --error-on-warnings .",
+		"format": "biome check --write .",
+		"fsd:check": "tsx scripts/check-boundaries.ts",
+		"test": "vitest run --project unit",
+		"test:coverage": "vitest run --project unit --coverage",
+		"test:browser": "vitest run --project browser",
+		"e2e": "pnpm build && tsc --noEmit -p e2e/tsconfig.json && playwright test",
+		"bench": "vitest bench --run --config vitest.bench.config.ts",
+		"perf": "tsx scripts/perf.ts",
+		"perf:check": "tsx scripts/perf.ts --check",
+		"docs:check": "node scripts/check-docs.mjs",
+		"package:check": "node scripts/check-package.mjs",
+		"gen:proto": "buf generate",
+		"check": "pnpm lint && pnpm fsd:check && pnpm type:check && pnpm test:coverage && pnpm build && pnpm docs:check && pnpm package:check",
+		"check:browser": "pnpm test:browser && pnpm e2e && pnpm perf:check",
+		"prepare": "husky || true",
+		"prepack": "pnpm build",
+		"prepublishOnly": "pnpm check && pnpm check:browser"
+	},
+	"dependencies": {
+		"@heojeongbo/log-palette": "^0.2.2"
+	},
+	"peerDependencies": {
+		"@bufbuild/protobuf": "^2.10.0",
+		"@connectrpc/connect": "^2.1.0",
+		"@connectrpc/connect-node": "^2.1.0",
+		"@playwright/test": ">=1.50.0"
+	},
+	"peerDependenciesMeta": {
+		"@bufbuild/protobuf": {
+			"optional": true
+		},
+		"@connectrpc/connect": {
+			"optional": true
+		},
+		"@connectrpc/connect-node": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.15",
+		"@bufbuild/buf": "1.73.0",
+		"@bufbuild/protobuf": "2.12.0",
+		"@bufbuild/protoc-gen-es": "2.12.0",
+		"@commitlint/cli": "20.1.0",
+		"@commitlint/config-conventional": "20.2.0",
+		"@connectrpc/connect": "2.1.1",
+		"@connectrpc/connect-node": "2.1.1",
+		"@connectrpc/connect-web": "2.1.1",
+		"@playwright/test": "1.60.0",
+		"@types/node": "24.3.0",
+		"@vitest/coverage-v8": "4.1.11",
+		"esbuild": "0.25.10",
+		"husky": "9.1.7",
+		"lint-staged": "16.2.7",
+		"tsx": "4.20.4",
+		"typescript": "5.9.3",
+		"vitest": "4.1.11"
+	},
+	"lint-staged": {
+		"*.{ts,mts,js,mjs,json,jsonc}": "biome check --write --no-errors-on-unmatched"
+	}
+}

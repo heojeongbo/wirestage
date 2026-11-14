@@ -1,0 +1,2 @@
+# Format and lint only what is staged; a slow hook is a hook people skip.
+pnpm exec lint-staged

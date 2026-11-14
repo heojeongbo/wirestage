@@ -1,0 +1,43 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		// ES2023 for `findLast` / `toSorted`; `target` stays ES2022 because lib
+		// says what exists and target says what to emit.
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"types": ["node"],
+
+		// `strict` is the floor. Every flag below is one TypeScript left out of
+		// `strict` because it breaks existing code; a new library has none.
+		"strict": true,
+		// `arr[i]` is `T | undefined`. Without it every index read is an unchecked
+		// assertion, and a frame lookup that misses is the bug this library's
+		// users would hit first.
+		"noUncheckedIndexedAccess": true,
+		// `meta.foo` must be `meta["foo"]` when `foo` only exists through an index
+		// signature, which keeps a typo'd header or meta key from compiling.
+		"noPropertyAccessFromIndexSignature": true,
+		"noImplicitOverride": true,
+		"noImplicitReturns": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedSideEffectImports": true,
+		"allowUnreachableCode": false,
+		"allowUnusedLabels": false,
+		// Off for the same reason as in ui-app-template: Playwright and Connect
+		// declare `prop?: T`, so forwarding an optional option fails under it.
+		"exactOptionalPropertyTypes": false,
+		// Biome owns unused-symbol reporting.
+		"noUnusedLocals": false,
+		"noUnusedParameters": false,
+
+		"skipLibCheck": true,
+		// Every import is either erased or emitted exactly as written.
+		"verbatimModuleSyntax": true,
+		"isolatedModules": true,
+		"moduleDetection": "force",
+		"noEmit": true
+	},
+	// `e2e` has a tsconfig of its own: it imports the built package.
+	"include": ["src", "tests", "bench", "scripts/*.ts", "*.config.ts"]
+}

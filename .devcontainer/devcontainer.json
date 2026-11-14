@@ -1,0 +1,28 @@
+{
+	"name": "wirestage",
+	"build": { "dockerfile": "Dockerfile" },
+	"workspaceFolder": "/workspaces/wirestage",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/wirestage,type=bind,consistency=cached",
+	// node_modules lives in a volume so a host install (darwin binaries for
+	// biome and esbuild) and the container's linux install never overwrite each
+	// other through the bind mount.
+	"mounts": [
+		"source=wirestage-node_modules,target=/workspaces/wirestage/node_modules,type=volume",
+		"source=wirestage-pnpm-store,target=/home/pwuser/.local/share/pnpm,type=volume"
+	],
+	"remoteUser": "pwuser",
+	"postCreateCommand": "pnpm install",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"biomejs.biome",
+				"vitest.explorer",
+				"ms-playwright.playwright"
+			],
+			"settings": {
+				"editor.defaultFormatter": "biomejs.biome",
+				"editor.formatOnSave": true
+			}
+		}
+	}
+}

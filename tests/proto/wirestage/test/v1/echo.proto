@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+// A service shaped to exercise every RPC kind the connect plugin handles.
+package wirestage.test.v1;
+
+message EchoRequest {
+  string text = 1;
+  int64 count = 2;
+}
+
+message EchoResponse {
+  string text = 1;
+  int64 index = 2;
+}
+
+service EchoService {
+  rpc Say(EchoRequest) returns (EchoResponse);
+  rpc Watch(EchoRequest) returns (stream EchoResponse);
+  rpc Collect(stream EchoRequest) returns (EchoResponse);
+  rpc Chat(stream EchoRequest) returns (stream EchoResponse);
+  // Side-effect free, so Connect clients may send it as a GET.
+  rpc Peek(EchoRequest) returns (EchoResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
