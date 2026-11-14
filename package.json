@@ -1,6 +1,6 @@
 {
 	"name": "@heojeongbo/wirestage",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Record, fake and fault-inject browser wire traffic in Playwright: REST, Connect, gRPC-web, gRPC, SSE, WebSocket and WebRTC data channels on one timeline.",
 	"type": "module",
 	"license": "MIT",

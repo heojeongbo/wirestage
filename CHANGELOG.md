@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-11-14)
+
+- A served fake sends `content-length` on every response with a body, HEAD
+  included, as a real server does: a client that sizes a download by a HEAD
+  request (an OCI registry client, say) got none. A 204 or 304 still carries
+  none.
+
 ## 0.3.0 (2026-11-14)
 
 - `rest.serve()`: a fake HTTP backend for clients outside the browser — a
