@@ -23,7 +23,7 @@ import {
 	encodeEnvelope,
 	parseTrailerBlock,
 } from "../../src/index.js";
-import { json, rest } from "../../src/rest.js";
+import { json, type RestStream, rest, stream } from "../../src/rest.js";
 import { sse } from "../../src/sse.js";
 import { webrtc } from "../../src/webrtc.js";
 import { websocket } from "../../src/websocket.js";
@@ -117,6 +117,56 @@ describe("rest in Chromium", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]).toMatchObject({ method: "GET", status: 404 });
 		expect(calls[0]?.response?.source).toBe("network");
+	});
+
+	it("holds a response open that the page reads as the test writes it", async () => {
+		const { stage, page } = await stageOn([rest({ baseURL: "/api" })]);
+		const watches: RestStream[] = [];
+		await stage.rest.get(
+			"/watch",
+			stream(
+				(watch) => {
+					watches.push(watch);
+				},
+				{ contentType: "application/x-ndjson" },
+			),
+		);
+		type Reading = { chunks: string[]; done: Promise<string | null> };
+		await page.evaluate(() => {
+			const reading = window as unknown as Reading;
+			reading.chunks = [];
+			reading.done = (async () => {
+				const response = await fetch("/api/watch");
+				const reader = (
+					response.body as ReadableStream<Uint8Array>
+				).getReader();
+				const decoder = new TextDecoder();
+				for (;;) {
+					const { value, done } = await reader.read();
+					if (done) return response.headers.get("content-type");
+					reading.chunks.push(decoder.decode(value));
+				}
+			})();
+		});
+		const received = () =>
+			page.evaluate(() => (window as unknown as Reading).chunks.join(""));
+		await expect.poll(() => watches.length).toBe(1);
+		// The page has the first chunk before the second is written.
+		await watches[0]?.write('{"n":1}\n');
+		await expect.poll(received).toBe('{"n":1}\n');
+		await watches[0]?.write('{"n":2}\n');
+		await watches[0]?.end();
+		expect(await page.evaluate(() => (window as unknown as Reading).done)).toBe(
+			"application/x-ndjson",
+		);
+		expect(await received()).toBe('{"n":1}\n{"n":2}\n');
+		const [call] = await stage.rest.calls();
+		expect(call).toMatchObject({ method: "GET", status: 200 });
+		expect(
+			(await stage.frames({ protocol: "rest", kind: "message" })).map((f) =>
+				f.payload.text(),
+			),
+		).toEqual(['{"n":1}\n', '{"n":2}\n']);
 	});
 });
 

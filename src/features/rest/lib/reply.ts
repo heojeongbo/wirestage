@@ -1,5 +1,5 @@
 import type { AbortErrorCode } from "../../../entities/plugin/index.js";
-import type { RestReply } from "../model/types.js";
+import type { RestReply, RestStream } from "../model/types.js";
 
 export interface ReplyInit {
 	readonly status?: number;
@@ -47,6 +47,26 @@ export function bytes(
 		init,
 		200,
 	);
+}
+
+/**
+ * A response that stays open — a watch, a log that follows, a long poll —
+ * written by `open` at the test's pace, then ended or cut. The head goes
+ * out before `open` runs, so an `open` that throws cuts the connection.
+ */
+export function stream(
+	open: (stream: RestStream) => void | Promise<void>,
+	init: ReplyInit & { readonly contentType?: string } = {},
+): RestReply {
+	return {
+		kind: "stream",
+		status: init.status ?? 200,
+		headers: {
+			"content-type": init.contentType ?? "application/octet-stream",
+			...init.headers,
+		},
+		open,
+	};
 }
 
 /** No body. 204 unless `status` says otherwise. */

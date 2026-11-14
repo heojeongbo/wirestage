@@ -1,4 +1,5 @@
 import type { FrameInit, Timeline } from "../../../entities/frame/index.js";
+import type { StreamEnd } from "../../../entities/plugin/index.js";
 import {
 	type ServedRequest,
 	type ServedResponse,
@@ -22,6 +23,7 @@ import type {
 } from "../model/types.js";
 import { filterCalls } from "./calls.js";
 import { compilePath, type PathMatcher } from "./path.js";
+import { openStream, type StreamReply } from "./stream.js";
 
 export interface ServeDeps {
 	/** The protocol the server's frames are recorded under. */
@@ -46,7 +48,32 @@ interface Route {
 	active: boolean;
 }
 
+/** A request being answered: by which route, and where it is on record. */
+interface Exchange {
+	readonly route: Route;
+	readonly response: ServedResponse;
+	readonly path: string;
+	readonly correlation: string;
+}
+
 const TEXT = { "content-type": "text/plain; charset=utf-8" };
+
+/** How a served stream that ran its course is on record. */
+const endOf = (end: StreamEnd): Omit<FrameInit, "protocol" | "endpoint"> =>
+	end === "cut"
+		? {
+				kind: "fault",
+				direction: "none",
+				source: "server",
+				meta: { reason: "cut" },
+			}
+		: {
+				kind: "lifecycle",
+				direction: "none",
+				// The client let go of it, or the route ended it.
+				source: end === "cancelled" ? "network" : "server",
+				meta: { event: "close", end },
+			};
 
 const failureOf = (error: unknown): string =>
 	error instanceof Error ? error.message : String(error);
@@ -105,13 +132,68 @@ export async function serveRest(
 		routes.splice(routes.indexOf(route), 1);
 	};
 
+	/** A route's bug: logged, and on the timeline as a `rule-error`. */
+	const report = (
+		{ route, path, correlation }: Exchange,
+		error: unknown,
+	): void => {
+		deps.log.error("rule failed", { rule: route.label, server: name }, error);
+		record(
+			{
+				kind: "fault",
+				direction: "none",
+				source: "server",
+				meta: {
+					reason: "rule-error",
+					rule: route.label,
+					error: failureOf(error),
+				},
+				correlation,
+			},
+			path,
+		);
+	};
+
+	/** What the client of a failed route is told. */
+	const failureBody = ({ route }: Exchange, error: unknown): string =>
+		`wirestage: rule "${route.label}" failed: ${failureOf(error)}`;
+
+	/**
+	 * Hold the response open for a `stream()` reply. A route that fails once
+	 * the head is out cuts the connection: its client sees a drop.
+	 */
+	const serveStream = async (reply: StreamReply, exchange: Exchange) => {
+		const { path, correlation } = exchange;
+		const served = exchange.response.open((end, failed) => {
+			// A route that failed is on record as its error, not as an end.
+			if (!failed) record({ ...endOf(end), correlation }, path);
+		});
+		try {
+			await openStream(reply, served.stream, (frame) =>
+				record(
+					{ ...frame, direction: "in", source: "server", correlation },
+					path,
+				),
+			);
+		} catch (error) {
+			if (served.fail(failureBody(exchange, error))) report(exchange, error);
+			// It was over first, and is on record as such: a write into a
+			// connection the client let go of, or one the route ended.
+			else
+				deps.log.debug(
+					"a stream's rule failed after the stream was over",
+					{ rule: exchange.route.label, server: name },
+					error,
+				);
+		}
+	};
+
 	/** Carry a reply out; `undefined` when it passes the request on. */
 	const answer = async (
 		reply: RestReply,
-		response: ServedResponse,
-		path: string,
-		correlation: string,
+		exchange: Exchange,
 	): Promise<"answered" | undefined> => {
+		const { response, path, correlation } = exchange;
 		switch (reply.kind) {
 			case "response": {
 				const body = reply.body ?? "";
@@ -131,6 +213,9 @@ export async function serveRest(
 				await response.send(reply.status, reply.headers, body);
 				return "answered";
 			}
+			case "stream":
+				await serveStream(reply, exchange);
+				return "answered";
 			case "passthrough":
 				return undefined;
 			case "abort":
@@ -148,38 +233,8 @@ export async function serveRest(
 				return "answered";
 			case "delay":
 				await deps.clock.sleep(reply.ms);
-				return answer(reply.reply, response, path, correlation);
+				return answer(reply.reply, exchange);
 		}
-	};
-
-	/** A route's bug: logged, on the timeline, and the client gets a 500 saying so. */
-	const fail = async (
-		route: Route,
-		error: unknown,
-		response: ServedResponse,
-		path: string,
-		correlation: string,
-	) => {
-		deps.log.error("rule failed", { rule: route.label, server: name }, error);
-		record(
-			{
-				kind: "fault",
-				direction: "none",
-				source: "server",
-				meta: {
-					reason: "rule-error",
-					rule: route.label,
-					error: failureOf(error),
-				},
-				correlation,
-			},
-			path,
-		);
-		await response.send(
-			500,
-			TEXT,
-			`wirestage: rule "${route.label}" failed: ${failureOf(error)}`,
-		);
 	};
 
 	const handle = async (request: ServedRequest, response: ServedResponse) => {
@@ -209,6 +264,7 @@ export async function serveRest(
 			const params = route.matcher.match(request.url);
 			if (params === undefined) continue;
 			const view = restRequest(request, correlation, params);
+			const exchange: Exchange = { route, response, path, correlation };
 			try {
 				if (route.match !== undefined && !route.match(view)) continue;
 				// Claimed before the resolver runs, which may wait: two requests
@@ -221,10 +277,11 @@ export async function serveRest(
 					typeof route.resolver === "function"
 						? await route.resolver(view)
 						: route.resolver;
-				if ((await answer(reply, response, path, correlation)) !== undefined)
-					return;
+				if ((await answer(reply, exchange)) !== undefined) return;
 			} catch (error) {
-				await fail(route, error, response, path, correlation);
+				// On record before the client is told, as every answer is.
+				report(exchange, error);
+				await response.send(500, TEXT, failureBody(exchange, error));
 				return;
 			}
 		}

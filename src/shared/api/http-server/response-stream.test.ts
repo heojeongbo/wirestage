@@ -16,8 +16,9 @@ afterEach(() => {
 });
 
 /**
- * The stream against a real socket is covered through the router; these are
- * what a socket will not do on demand, or not through a fetch.
+ * The stream against a real socket is covered through the router and the
+ * served fakes; these are what a socket will not do on demand, or not
+ * through a fetch.
  */
 describe("response stream", () => {
 	it("rejects a write the socket refuses, with the socket's own error", async () => {

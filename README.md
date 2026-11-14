@@ -62,7 +62,7 @@ ones you use.
 
 | Subpath | Plugin | Fakes | Records | Faults | Extra peers |
 | --- | --- | --- | --- | --- | --- |
-| `/rest` | `rest()` | routes with `:params`, `json`/`text`/`bytes` replies; servers for clients outside the browser | requests and real responses | abort, delay, status | — |
+| `/rest` | `rest()` | routes with `:params`, `json`/`text`/`bytes` replies and responses that stay open; servers for clients outside the browser | requests and real responses | abort, delay, status | — |
 | `/connect` | `connect()` | Connect, gRPC-web: unary, server streams, whole services | decoded messages and status | fail, abort, hold, cut | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf` |
 | `/sse` | `sse()` | event streams driven from the test | events sent | end, cut | — |
 | `/websocket` | `websocket()` | a fake server, or a proxy in front of the real one | both directions | drop, close | — |
@@ -135,8 +135,9 @@ export async function openSession(browser: Browser) {
 - **TypeScript 5.0 or later**, with `moduleResolution` set to `node16`,
   `nodenext` or `bundler` (the entry points are published through `exports`),
   and `@types/node`, as in any Playwright project.
-- Live streams (server streams, SSE) redirect the page's request to a local
-  server; see [troubleshooting](docs/troubleshooting.md) for https pages.
+- Live streams (server streams, SSE, REST `stream()` replies) redirect the
+  page's request to a local server; see
+  [troubleshooting](docs/troubleshooting.md) for https pages.
 
 ## Developing
 

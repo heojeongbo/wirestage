@@ -2,6 +2,7 @@ import type { Frame } from "../../../entities/frame/index.js";
 import type {
 	AbortErrorCode,
 	HttpRequestView,
+	StreamEnd,
 } from "../../../entities/plugin/index.js";
 import type { UrlMatcher } from "../../../shared/lib/match/index.js";
 
@@ -36,13 +37,48 @@ export interface RestRequest extends HttpRequestView {
 	readonly query: URLSearchParams;
 }
 
-/** What a resolver answers. Build one with the helpers: `json`, `text`, `abort`, ... */
+/**
+ * A response a `stream()` reply holds open, written at the test's pace. The
+ * same on a page's route and a served fake's.
+ */
+export interface RestStream {
+	/**
+	 * Write a chunk. Resolves once it is written, and on the timeline as a
+	 * `message`; rejects with `CLOSED` once the response is over, the client
+	 * letting go included.
+	 */
+	write(chunk: Uint8Array | string): Promise<void>;
+	/** End the response cleanly. Resolves once the end is on the timeline. */
+	end(): Promise<void>;
+	/**
+	 * Reset the connection mid-response, as a network drop would. Resolves
+	 * once the cut is on the timeline.
+	 */
+	cut(): Promise<void>;
+	/**
+	 * Resolves when the response is over, with how, once that is on the
+	 * timeline: `cancelled` when the client let go of it, or its server
+	 * closed.
+	 */
+	readonly closed: Promise<StreamEnd>;
+}
+
+/**
+ * What a resolver answers. Build one with the helpers: `json`, `text`,
+ * `stream`, `abort`, ...
+ */
 export type RestReply =
 	| {
 			readonly kind: "response";
 			readonly status: number;
 			readonly headers: Readonly<Record<string, string>>;
 			readonly body?: Uint8Array | string;
+	  }
+	| {
+			readonly kind: "stream";
+			readonly status: number;
+			readonly headers: Readonly<Record<string, string>>;
+			open(stream: RestStream): void | Promise<void>;
 	  }
 	| { readonly kind: "passthrough" }
 	| { readonly kind: "abort"; readonly error: AbortErrorCode }
@@ -72,7 +108,10 @@ export interface RestCall {
 	readonly url: string;
 	readonly request: Frame;
 	readonly response: Frame | undefined;
-	/** The HTTP status; undefined for an aborted or unfinished request. */
+	/**
+	 * The HTTP status; undefined for an aborted or unfinished request. A
+	 * stream's is its head's, there while the stream is still open.
+	 */
 	readonly status: number | undefined;
 	/** The served fake that received it (its URL); undefined for a page's. */
 	readonly server: string | undefined;

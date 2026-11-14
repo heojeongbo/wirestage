@@ -24,28 +24,29 @@ export function filterCalls(
 }
 
 /**
- * Pair each recorded request with how it ended. One call per exchange,
+ * Pair each recorded request with its response. One call per exchange,
  * oldest first; a frame with no correlation is an exchange of its own.
  */
 export function assembleCalls(frames: readonly Frame[]): RestCall[] {
-	const byCall = new Map<string, { request?: Frame; end?: Frame }>();
+	const byCall = new Map<string, { request?: Frame; response?: Frame }>();
 	for (const frame of frames) {
+		// A fault, a stream's chunks and its end: what no call lists.
+		if (frame.kind !== "request" && frame.kind !== "response") continue;
 		const key = frame.correlation ?? `#${frame.seq}`;
 		const entry = byCall.get(key) ?? {};
-		if (frame.kind === "request") entry.request = frame;
-		else entry.end = frame;
+		entry[frame.kind] = frame;
 		byCall.set(key, entry);
 	}
 	const calls: RestCall[] = [];
-	for (const [correlation, { request, end }] of byCall) {
+	for (const [correlation, { request, response }] of byCall) {
 		if (request === undefined) continue;
-		const status = end?.meta["status"];
+		const status = response?.meta["status"];
 		calls.push({
 			correlation,
 			method: String(request.meta["method"]),
 			url: String(request.meta["url"]),
 			request,
-			response: end?.kind === "response" ? end : undefined,
+			response,
 			status: typeof status === "number" ? status : undefined,
 			server:
 				typeof request.meta["server"] === "string"

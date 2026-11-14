@@ -7,6 +7,7 @@ export {
 	empty,
 	json,
 	passthrough,
+	stream,
 	text,
 } from "./lib/reply.js";
 export type {
@@ -22,4 +23,5 @@ export type {
 	RestRouteOptions,
 	RestServeOptions,
 	RestServer,
+	RestStream,
 } from "./model/types.js";

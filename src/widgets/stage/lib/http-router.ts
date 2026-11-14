@@ -9,6 +9,10 @@ import type {
 	PassthroughResponse,
 	StreamEnd,
 } from "../../../entities/plugin/index.js";
+import {
+	createResponseStream,
+	type ServedStream,
+} from "../../../shared/api/http-server/index.js";
 import type {
 	PagePort,
 	RequestPort,
@@ -27,7 +31,6 @@ import { WirestageError } from "../../../shared/lib/errors/index.js";
 import type { ScopedLogger } from "../../../shared/lib/logger/index.js";
 import { compileUrlMatcher } from "../../../shared/lib/match/index.js";
 import type { AttachedContext } from "./attached-context.js";
-import { createResponseStream, type ServedStream } from "./response-stream.js";
 
 export interface HttpRouterDeps {
 	readonly timeline: Timeline;

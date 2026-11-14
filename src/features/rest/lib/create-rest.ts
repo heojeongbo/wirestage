@@ -17,6 +17,7 @@ import type {
 import { filterCalls } from "./calls.js";
 import { compilePath } from "./path.js";
 import { serveRest } from "./serve.js";
+import { openStream } from "./stream.js";
 
 /**
  * REST and other plain HTTP: routes by method and path with `:params`, replies
@@ -34,7 +35,10 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 			// Under the plugin's own name: two instances never share an id.
 			const servedCorrelation = createSequence(`${name}-`);
 
-			const toOutcome = async (reply: RestReply): Promise<HttpOutcome> => {
+			const toOutcome = async (
+				reply: RestReply,
+				view: HttpRequestView,
+			): Promise<HttpOutcome> => {
 				switch (reply.kind) {
 					case "response":
 						return {
@@ -43,13 +47,31 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 							headers: reply.headers,
 							...(reply.body === undefined ? {} : { body: reply.body }),
 						};
+					case "stream":
+						return {
+							type: "stream",
+							// The stage records the request and how the stream ended.
+							open: (response) =>
+								openStream(reply, response, (frame) =>
+									context.timeline.append({
+										...frame,
+										protocol: name,
+										direction: "in",
+										endpoint: view.url.pathname,
+										source: "stub",
+										correlation: view.correlation,
+										context: view.context,
+										page: view.page,
+									}),
+								),
+						};
 					case "passthrough":
 						return { type: "fallback" };
 					case "abort":
 						return { type: "abort", error: reply.error };
 					case "delay":
 						await context.clock.sleep(reply.ms);
-						return toOutcome(reply.reply);
+						return toOutcome(reply.reply, view);
 				}
 			};
 
@@ -102,6 +124,7 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 							typeof resolver === "function"
 								? await resolver(request)
 								: resolver,
+							view,
 						);
 					},
 				});

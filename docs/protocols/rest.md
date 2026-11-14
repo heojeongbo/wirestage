@@ -33,8 +33,9 @@ test("routes", async ({ page, stage }) => {
 - The query never takes part in matching, so a route for `/search` answers
   `/search?q=x`; read it from `request.query`. A `?` in a path is refused
   rather than left to never match.
-- Replies: `json`, `text`, `bytes`, `empty`, `passthrough`, `abort(code)`,
-  `delay(ms, reply)`. A resolver may be one, or compute one from the request.
+- Replies: `json`, `text`, `bytes`, `empty`, `stream(open)`, `passthrough`,
+  `abort(code)`, `delay(ms, reply)`. A resolver may be one, or compute one
+  from the request.
 - Every route takes `times` and `match`. The newest route that matches wins;
   one that steps aside (`match` said no, `times` ran out, `passthrough()`)
   leaves the request to the next, and then to the network.
@@ -44,6 +45,54 @@ test("routes", async ({ page, stage }) => {
   was aborted or has not finished.
 - A resolver that throws answers the page with a 500 naming the route, and
   logs the error: a bug in a test must not look like a hung request.
+
+## Responses that stay open
+
+`stream(open, { status, headers, contentType })` answers with a response the
+test writes as it goes: a watch, a log that follows, a long poll. A page's
+route and a served fake's (below) take it alike.
+
+```ts
+import { createStage } from "@heojeongbo/wirestage";
+import { type RestStream, rest, stream } from "@heojeongbo/wirestage/rest";
+
+export async function fakeWatch() {
+	const stage = createStage({ plugins: [rest()] });
+	const server = await stage.rest.serve({ name: "fake scheduler" });
+	const watches: RestStream[] = [];
+	await server.get(
+		"/v1/events",
+		stream(
+			async (watch) => {
+				watches.push(watch);
+				// A heartbeat, so the client knows it is connected.
+				await watch.write("{}\n");
+			},
+			{ contentType: "application/x-ndjson" },
+		),
+	);
+	// …later: await watches[0]?.write(event), then end() or cut() it.
+	return { stage, server, watches };
+}
+```
+
+- The head goes out at once: 200 unless `status` says otherwise,
+  `application/octet-stream` unless `contentType` does. `open` then writes
+  the body with `write(chunk)` and ends it with `end()`, or `cut()`s the
+  connection as a network drop would. `open` may return long before that:
+  the response stays open until it is ended, cut, or let go of.
+- `closed` resolves with how it ended — `ended`, `cut`, or `cancelled` when
+  the client let go of it or its server closed — once that is on the
+  timeline. A `write` after it rejects with `CLOSED`.
+- On the timeline, the head is the exchange's `response`, so `calls()` has
+  the status while the stream is still open; each chunk is a `message`, and
+  the end a `lifecycle` close or a `cut` fault.
+- The head is out before `open` runs, so an `open` that throws cuts the
+  connection, on record as the route's `rule-error`. A status no head can
+  carry answers 500, as a resolver that throws does.
+- A page's stream is redirected to the stage's local stream server, as SSE
+  and server streams are; see [troubleshooting](../troubleshooting.md) for
+  https pages.
 
 ## Fakes for clients outside the browser
 

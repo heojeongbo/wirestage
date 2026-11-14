@@ -5,6 +5,7 @@ import {
 	fakeResponse,
 } from "../../__fixtures__/fake-playwright.js";
 import { named } from "../../entities/plugin/index.js";
+import { createDeferred } from "../../shared/lib/async/index.js";
 import { createManualClock } from "../../shared/lib/clock/index.js";
 import { createStage } from "../../widgets/stage/index.js";
 import {
@@ -14,7 +15,9 @@ import {
 	empty,
 	json,
 	passthrough,
+	type RestStream,
 	rest,
+	stream,
 	text,
 } from "./index.js";
 import { compilePath } from "./lib/path.js";
@@ -61,8 +64,33 @@ describe("reply helpers", () => {
 		expect(abort()).toEqual({ kind: "abort", error: "failed" });
 		expect(abort("timedout")).toEqual({ kind: "abort", error: "timedout" });
 		expect(delay(5, empty())).toEqual({ kind: "delay", ms: 5, reply: empty() });
+		const open = () => {};
+		expect(stream(open)).toEqual({
+			kind: "stream",
+			status: 200,
+			headers: { "content-type": "application/octet-stream" },
+			open,
+		});
+		expect(
+			stream(open, {
+				status: 206,
+				contentType: "application/x-ndjson",
+				headers: { a: "b" },
+			}),
+		).toMatchObject({
+			status: 206,
+			headers: { "content-type": "application/x-ndjson", a: "b" },
+		});
 	});
 });
+
+/** The next chunk a streamed body delivers, as text; `done` at its end. */
+async function nextChunk(
+	reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<string> {
+	const { value, done } = await reader.read();
+	return done ? "done" : new TextDecoder().decode(value);
+}
 
 describe("path patterns", () => {
 	const url = (href: string) => new URL(href);
@@ -373,6 +401,198 @@ describe("rest plugin", () => {
 		const everything = await setup({ record: true });
 		await everything.context.dispatch("http://h/anything");
 		expect((await everything.stage.rest.calls()).length).toBe(1);
+	});
+});
+
+describe("streamed replies", () => {
+	it("writes a page's response at the test's pace, each chunk on the timeline", async () => {
+		const { stage, context } = await setup();
+		const opened = createDeferred<RestStream>();
+		await stage.rest.get(
+			"/watch",
+			stream((live) => opened.resolve(live), {
+				contentType: "application/x-ndjson",
+				headers: { "x-a": "1" },
+			}),
+		);
+		const response = await context.fetch({ page: context.newPage() })(
+			"http://app.test/watch?index=7",
+		);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toBe("application/x-ndjson");
+		expect(response.headers.get("x-a")).toBe("1");
+		const live = await opened.promise;
+		const reader =
+			response.body?.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+		await live.write('{"n":1}\n');
+		expect(await nextChunk(reader)).toBe('{"n":1}\n');
+		await live.write(new TextEncoder().encode('{"n":2}\n'));
+		expect(await nextChunk(reader)).toBe('{"n":2}\n');
+		await live.end();
+		expect(await nextChunk(reader)).toBe("done");
+		expect(await live.closed).toBe("ended");
+		await expect(live.write("late")).rejects.toMatchObject({ code: "CLOSED" });
+		const [call] = await stage.rest.calls();
+		expect(call).toMatchObject({ method: "GET", status: 200 });
+		expect(
+			stage.timeline
+				.frames({ correlation: call?.correlation as string })
+				.map((f) => [f.kind, f.source, f.endpoint, f.payload.text()]),
+		).toEqual([
+			["request", "page", "/watch", ""],
+			["response", "stub", "/watch", ""],
+			["message", "stub", "/watch", '{"n":1}\n'],
+			["message", "stub", "/watch", '{"n":2}\n'],
+			["lifecycle", "stub", "/watch", ""],
+		]);
+		expect(call?.response?.meta).toEqual({
+			status: 200,
+			headers: { "content-type": "application/x-ndjson", "x-a": "1" },
+		});
+		// Every frame of the exchange is the page's.
+		expect(
+			new Set(
+				stage.timeline
+					.frames({ correlation: call?.correlation as string })
+					.map((f) => f.page),
+			),
+		).toEqual(new Set([call?.request.page]));
+		expect(call?.request.page).toMatch(/^p\d+$/);
+	});
+
+	it("holds a served response open, its head, chunks and end on the timeline", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve({ name: "fake backend" });
+		const opened: RestStream[] = [];
+		await server.get(
+			"/v1/event/stream",
+			stream(
+				async (live) => {
+					opened.push(live);
+					await live.write("{}\n");
+				},
+				{ contentType: "application/json" },
+			),
+		);
+		const response = await fetch(`${server.url}/v1/event/stream`);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toBe("application/json");
+		const reader =
+			response.body?.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+		expect(await nextChunk(reader)).toBe("{}\n");
+		const [live] = opened as [RestStream];
+		await live.write("more\n");
+		expect(await nextChunk(reader)).toBe("more\n");
+		await live.end();
+		expect(await nextChunk(reader)).toBe("done");
+		expect(await live.closed).toBe("ended");
+		const [call] = await server.calls();
+		expect(call).toMatchObject({ status: 200, server: server.url });
+		expect(
+			stage.timeline
+				.frames({ correlation: "rest-1" })
+				.map((f) => [f.kind, f.source, f.payload.text(), f.meta["server"]]),
+		).toEqual([
+			["request", "network", "", server.url],
+			["response", "server", "", server.url],
+			["message", "server", "{}\n", server.url],
+			["message", "server", "more\n", server.url],
+			["lifecycle", "server", "", server.url],
+		]);
+	});
+
+	it("cuts a served stream, hears its client let go, and closes with the stage", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve();
+		const opened: RestStream[] = [];
+		await server.get(
+			"/follow",
+			stream((live) => {
+				opened.push(live);
+			}),
+		);
+		const cut = await fetch(`${server.url}/follow`);
+		await expect.poll(() => opened.length).toBe(1);
+		await opened[0]?.cut();
+		await expect(cut.text()).rejects.toThrow();
+		expect(await opened[0]?.closed).toBe("cut");
+		const leaving = new AbortController();
+		await fetch(`${server.url}/follow`, { signal: leaving.signal });
+		await expect.poll(() => opened.length).toBe(2);
+		leaving.abort();
+		expect(await opened[1]?.closed).toBe("cancelled");
+		await expect(opened[1]?.write("late")).rejects.toMatchObject({
+			code: "CLOSED",
+		});
+		const open = await fetch(`${server.url}/follow`);
+		await expect.poll(() => opened.length).toBe(3);
+		await stage.dispose();
+		expect(await opened[2]?.closed).toBe("cancelled");
+		await expect(open.text()).rejects.toThrow();
+		expect(
+			stage.timeline
+				.frames({ kind: ["fault", "lifecycle"] })
+				.map((f) => [
+					f.correlation,
+					f.kind,
+					f.source,
+					f.meta["reason"] ?? f.meta["end"],
+				]),
+		).toEqual([
+			["rest-1", "fault", "server", "cut"],
+			["rest-2", "lifecycle", "network", "cancelled"],
+			["rest-3", "lifecycle", "network", "cancelled"],
+		]);
+	});
+
+	it("answers 500 for a stream that cannot open, and cuts one that fails open", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve({ name: "fake backend" });
+		await server.get(
+			"/bad-status",
+			stream(() => {}, { status: 42 }),
+		);
+		await server.get(
+			"/throws",
+			stream(async (live) => {
+				await live.write("partial");
+				throw new Error("bug in the stream");
+			}),
+		);
+		await server.get(
+			"/late",
+			stream(async (live) => {
+				await live.end();
+				throw new Error("after the end");
+			}),
+		);
+		const bad = await fetch(`${server.url}/bad-status`);
+		expect(bad.status).toBe(500);
+		expect(await bad.text()).toBe(
+			'wirestage: rule "GET /bad-status" failed: a response status is an integer from 100 to 999, got 42',
+		);
+		const throws = await fetch(`${server.url}/throws`);
+		expect(throws.status).toBe(200);
+		await expect(throws.text()).rejects.toThrow();
+		expect(await (await fetch(`${server.url}/late`)).text()).toBe("");
+		// A failed stream is on record as its error; one over first, as its end.
+		expect(
+			stage.timeline
+				.frames({ kind: ["fault", "lifecycle"] })
+				.map((f) => [
+					f.endpoint,
+					f.meta["reason"] ?? f.meta["end"],
+					f.meta["error"],
+				]),
+		).toEqual([
+			[
+				"/bad-status",
+				"rule-error",
+				"a response status is an integer from 100 to 999, got 42",
+			],
+			["/throws", "rule-error", "bug in the stream"],
+			["/late", "ended", undefined],
+		]);
 	});
 });
 

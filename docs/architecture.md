@@ -106,7 +106,7 @@ thing in the browser, so two plugins never install competing hooks.
 | `http-router.ts` | `HttpRouter`, `HttpRule`, `HttpOutcome` | One Playwright route per attached context. |
 | `socket-router.ts` | `SocketRouter`, `SocketRule`, `SocketView` | One WebSocket route per attached context. |
 | `page-host.ts`, `page-runtime.ts` | `PageHost`, `PageModule` | One init script and one binding per attached context. |
-| `response-stream.ts` over `shared/api/stream-server` | `ResponseStream` | Local servers for responses that stay open. |
+| `shared/api/stream-server`, written through `shared/api/http-server`'s `createResponseStream` | `ResponseStream` | Local servers for responses that stay open. A served fake writes its own through the same adapter. |
 
 `reads.ts` is the stage's read side (`frames`, `drain`, `mark`, `since`,
 `between`, `waitFor`, `report`), and `create-stage.ts` is the composition

@@ -5,6 +5,11 @@ import {
 } from "node:http";
 
 import { type Listening, type ListenOptions, listen } from "./listen.js";
+import {
+	createResponseStream,
+	type OpenResponseEnd,
+	type ServedStream,
+} from "./response-stream.js";
 
 /** A request a served fake received, read in full before it is handed on. */
 export interface ServedRequest {
@@ -16,7 +21,7 @@ export interface ServedRequest {
 	readonly body: Uint8Array;
 }
 
-/** The answer to a {@link ServedRequest}: one of the two, once. */
+/** The answer to a {@link ServedRequest}: one of the three, once. */
 export interface ServedResponse {
 	/**
 	 * Send a complete response. A header may carry several values separated
@@ -27,6 +32,12 @@ export interface ServedResponse {
 		headers: Readonly<Record<string, string>>,
 		body: Uint8Array | string,
 	): Promise<void>;
+	/**
+	 * Hold the response open, for a body written as it comes. `onClose`
+	 * hears how it ended, `failed` when it was failed, before the stream's
+	 * `closed` resolves.
+	 */
+	open(onClose: (end: OpenResponseEnd, failed: boolean) => void): ServedStream;
 	/** Drop the connection: no status, no body — a network failure. */
 	reset(): void;
 }
@@ -51,7 +62,10 @@ const readBody = (message: IncomingMessage): Promise<Uint8Array> =>
 		message.once("error", reject);
 	});
 
-function responderOf(response: ServerResponse): ServedResponse {
+function responderOf(
+	message: IncomingMessage,
+	response: ServerResponse,
+): ServedResponse {
 	return {
 		send(status, headers, body) {
 			for (const [name, value] of Object.entries(headers))
@@ -75,6 +89,7 @@ function responderOf(response: ServerResponse): ServedResponse {
 				response.end(body);
 			});
 		},
+		open: (onClose) => createResponseStream(message, response, onClose),
 		reset() {
 			response.destroy();
 		},
@@ -92,7 +107,7 @@ export async function serveHttp(
 	handle: RequestHandler,
 ): Promise<Listening> {
 	const server = createServer((message, response) => {
-		const responder = responderOf(response);
+		const responder = responderOf(message, response);
 		readBody(message)
 			.then((body) =>
 				handle(
