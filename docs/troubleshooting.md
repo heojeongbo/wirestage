@@ -32,6 +32,16 @@ plugin before calling `attach`.
 - A read went on without a frame that did not answer within `pageTimeoutMs`
   (2 s) — a page stuck on a dialog, say. A warning says so; what that frame
   had buffered arrives with the next read that reaches it.
+- It was emitted while the page was already going away: in the page's own
+  `beforeunload`, `pagehide` or `unload` handlers. What a page held when it
+  navigated or closed is delivered; what it emits after that cannot be.
+
+## Detach or dispose takes seconds
+
+A page has a dialog open, and Playwright does not remove page hooks until it
+closes. Each removal waits at most `pageTimeoutMs`, with a warning, so a
+teardown costs up to three times that (6 s at the default); dismiss dialogs
+before the test ends to avoid it.
 
 ## A WebSocket mock is ignored
 
@@ -50,6 +60,12 @@ shows which rule handled what.
 A rule threw. The body names it — `wirestage: rule "GET /rooms/:id" failed:
 …` — the error is logged, and the timeline has a `fault` frame with
 `meta.reason: "rule-error"`.
+
+## A WebSocket closes with 1011
+
+A socket rule threw — a mock's `onConnect`, or a plugin's own rule. The close
+reason names the rule (`wirestage: rule "…" failed: …`), the error is logged,
+and the timeline has a `fault` frame with `meta.reason: "rule-error"`.
 
 ## A response is missing from `calls()`
 

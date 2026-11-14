@@ -69,15 +69,21 @@ frames carry `meta.reason`, lifecycle frames `meta.event`.
 (an object-method body is not a valid expression), and are tested both called
 directly (coverage) and rebuilt from their source (self-containment).
 `buildPageScript` defines `__name` because tsx's `keepNames` injects it; e2e
-runs the tsc build, where it is absent. Page code reaches every frame, and
-undoes itself in `onDetach`.
+runs the tsc build, where it is absent. `pages.register()` refuses an
+installer the page could not rebuild. Page code reaches every frame, sends
+what it holds on `beforeunload` and `pagehide`, and undoes itself in
+`onDetach` — or when its binding is removed under it, so it never throws into
+the app.
 
 **The fakes model the browser, and the browser tests check the fakes.** When
 `tests/browser` disagrees with `src/__fixtures__`, the fake is wrong: fix it
-first. Two that were learned this way: a WebSocket close is reported to its
-own `onClose` handler again, and the server's end is closed by the browser's
-`WebSocket.close()`, which throws on a code outside 1000/3000-4999 and on a
-reason without a code.
+first. Some that were learned this way: a WebSocket close is reported to its
+own `onClose` handler again; an end with no `onMessage` handler passes its
+messages on to the other end; a binding call from the `pagehide` of a frame
+that is navigating never arrives, and a removed binding throws synchronously;
+and the server's end of a WebSocket is closed by the browser's
+`WebSocket.close()`, which throws on a code outside 1000/3000-4999, on a reason
+without a code and on a reason over 123 bytes.
 
 **Coverage is 100% per file, and stays that way.** Unreachable defensive code
 is removed or restructured, never covered with contortions. A branch only a
@@ -97,9 +103,10 @@ own handlers: headers arrive with the first message, errors are encoded the
 way Connect encodes them. A test tool that is more convenient than the server
 hides the bugs the test was written for.
 
-**Errors are contained and named.** A rule that throws answers 500 with its
-label; attach rolls back; detach and dispose run every step and throw what
-failed at the end. Nothing rejects into Playwright, where it would surface in
+**Errors are contained and named.** An HTTP rule that throws answers 500 with
+its label, a socket rule closes the page's socket with 1011, and both record a
+`rule-error` fault; attach rolls back; detach and dispose run every step and
+throw what failed at the end. Nothing rejects into Playwright, where it would surface in
 whichever test runs next.
 
 **No `console`, no `any`.** Log through `createScopedLogger(scope)`; the

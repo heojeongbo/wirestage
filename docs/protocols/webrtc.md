@@ -48,7 +48,8 @@ How it works: an init script wraps `RTCDataChannel.prototype.send`, wraps
 `datachannel` first, so the plugin's `message` listener runs before the
 page's — the only position from which `stopImmediatePropagation` can
 suppress. `instanceof RTCPeerConnection`, its statics and subclasses keep
-working, and detaching the stage puts the originals back.
+working, and detaching the stage puts the originals back — in a document that
+loads during the detach too.
 
 Chromium hides local ICE candidates behind mDNS by default; a test that opens
 peers in one page needs `--disable-features=WebRtcHideLocalIpsWithMdns`.

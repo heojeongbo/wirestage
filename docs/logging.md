@@ -29,8 +29,8 @@ What lands at which level:
 
 | Level | Examples |
 | --- | --- |
-| `error` | A rule threw (the page got a 500 naming it); a page module's receiver, or a timeline subscriber, threw. |
-| `warn` | A passed-through response could not be read; a frame that did not answer a flush in time; an unknown `WIRESTAGE_REPORT` or `WIRESTAGE_LOG`. |
+| `error` | A rule threw (the page got a 500 or a 1011 close naming it); a page module's installer, `state()`, `onState`, `onDetach` or receiver threw; a timeline subscriber threw. |
+| `warn` | A passed-through response could not be read; a frame that did not answer a flush in time; page hooks that could not be removed in time; an unknown `WIRESTAGE_REPORT` or `WIRESTAGE_LOG`. |
 | `debug` | Attach and detach, page flushes skipped during navigation, undecodable RPC payloads, streams ended by a closed connection. |
 
 Inside the library, `console` is banned by Biome and log-palette may only be

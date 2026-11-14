@@ -133,18 +133,33 @@ the browser adds after Playwright's route saw the request (`last-event-id`);
 
 `sockets.add({ protocol, label, url, times, open })`: `open(socket)` is called
 for each socket the rule takes, with `socket.page` — the page's end — and
-`socket.connectToServer()` for the real server's. Nothing is forwarded for
-you; a proxy wires the two ends together. Each end has `send`, `close`,
-`onMessage` and `onClose`. An `onClose` handler runs for every close of its
-end, including the one it carries out itself, so it must be safe to run
-twice; and once a handler is set, the page's socket stays in `CLOSING` until
-the rule closes the page's end.
+`socket.connectToServer()` for the real server's. Each end has `send`,
+`close`, `onMessage` and `onClose`.
+
+- **No message is forwarded for you.** An end drops what it sends until it
+  has an `onMessage` handler, so a proxy wires both directions itself, and a
+  direction it does not wire is dropped — not passed on unrecorded. Set the
+  handlers before awaiting anything in `open`.
+- **Closes are passed on** to the other end, unless the end that closed has an
+  `onClose` handler. That handler runs for every close of its end, including
+  the one it carries out itself, so it must be safe to run twice; and once it
+  is set, the page's socket stays in `CLOSING` until the rule closes the page's
+  end.
+- **The server's end is closed by the browser**, which sends only 1000 and
+  3000-4999 and a reason of at most 123 bytes: another code goes out as 1000,
+  and a longer reason is cut, so the close still happens. The page's end takes
+  any code and reason.
+- **A rule that throws** is logged and recorded as a `fault` frame with
+  `meta.reason: "rule-error"` and the rule's label; the page's socket is closed
+  with 1011, and a server the rule connected is closed too.
 
 ## Page modules
 
 A page module's `install` is serialized with `toString()` and runs inside the
 page, so it must be self-contained: no imports, no references to module
-scope, and declared with `function`. It gets `env` with `emit`, `now`,
+scope, and declared with `function`. `pages.register()` refuses one the page
+could not rebuild — a method shorthand, a bound or a native function — with
+`INVALID_ARGUMENT` naming the module. It gets `env` with `emit`, `now`,
 `encode`, `decode`, `onCommand`, `onState` and `onDetach`; Node receives
 batches in `receive`.
 
@@ -155,6 +170,12 @@ batches in `receive`.
   page and returns each answer.
 - Undo in `onDetach` what `install` did to the page. Detaching the stage runs
   it, so a document that outlives the stage is left as it was found.
+- A module's failure stays its own: an installer, a `state()`, an `onState` or
+  an `onDetach` that throws is logged at error naming the module, and every
+  other module carries on.
+- What a page emits is sent on when it navigates or closes, as well as before
+  every read. What it emits once it is already going away — in its own
+  `beforeunload`, `pagehide` or `unload` handlers — cannot be delivered.
 - Register modules in `setup` — the init script is fixed at the first attach.
 
 ## Building on another plugin

@@ -43,9 +43,14 @@ test("a proxy that drops", async ({ page, stage }) => {
   say which page opened the socket.
 - **Closing.** Whoever closes — the page, the real server or the test —
   `connection.closed` resolves with the code and reason, and the page's socket
-  reaches `CLOSED`. `connection.close()` gives the page any code a server may
-  send. A proxy closes the real server's end through the browser, which sends
-  only 1000 and 3000-4999: any other code reaches the server as 1000.
+  reaches `CLOSED`. `connection.close()` gives the page any code and reason a
+  server may send. A proxy closes the real server's end through the browser,
+  which sends only 1000 and 3000-4999 and a reason of at most 123 bytes: any
+  other code reaches the server as 1000, and a longer reason is cut.
+- After a connection is over, `send`, `toPage` and `toServer` throw `CLOSED`,
+  and `broadcast` skips it.
+- An `onConnect` that throws closes the page's socket with 1011 and records a
+  `fault` frame (`meta.reason: "rule-error"`).
 
 ## When routing starts
 

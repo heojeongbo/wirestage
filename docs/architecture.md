@@ -145,9 +145,17 @@ with `prepare()` — at attach.
 Page-side code too. Plugins register `PageModule`s; the page host injects all
 of them as one init script per context, with one binding back to Node. Each
 frame of each page batches what its modules emit — the first entry after a
-quiet spell is sent at once — and a read flushes every frame first, bounded
-by a timeout so a stuck page cannot stall the test. Detaching runs every
-module's `onDetach` and removes the hooks.
+quiet spell is sent at once, and the rest go when the page navigates or
+closes (`beforeunload`, `pagehide`) — and a read flushes every frame first,
+bounded by a timeout so a stuck page cannot stall the test. The runtime's
+`beforeunload` listener never prompts.
+
+Detaching removes the init script first, then runs every module's
+`onDetach` in the open frames, then removes the binding — so a document that
+loads meanwhile is not left hooked — and each step is bounded by the same
+timeout, because Playwright's removals wait while a page shows a dialog. A
+runtime whose binding disappears under it undoes its modules and steps aside
+rather than throwing into the app.
 
 ## Lifecycle
 

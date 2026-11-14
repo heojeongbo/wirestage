@@ -42,7 +42,9 @@ things happened in. Frames are recorded in two places:
   WebSockets.
 - **In the page**, then sent on in batches: WebRTC, and any page module of
   your own. The first entry after a quiet spell is sent at once; the rest
-  follow every `pageFlushMs` (25 ms), and before every read.
+  follow every `pageFlushMs` (25 ms), before every read, and when the page
+  navigates or closes. What a page emits once it is already going away — in
+  its own `beforeunload`, `pagehide` or `unload` handlers — is lost.
 
 So a WebRTC frame can reach the timeline up to one flush window after an HTTP
 frame that happened later. When the order between the two matters, compare
