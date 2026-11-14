@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createScopedLogger } from "../lib/logger/index.js";
-import { listen } from "./http-server/index.js";
+import { listen, serveHttp } from "./http-server/index.js";
 import {
 	createStreamServer,
 	type StreamServer,
@@ -67,6 +67,94 @@ describe("listen", () => {
 		servers.push(listening);
 		expect(listening.url).toBe(`http://[::1]:${listening.port}`);
 		expect(new URL(listening.url).port).toBe(String(listening.port));
+	});
+});
+
+describe("serveHttp", () => {
+	it("hands each request over whole, and sends what the handler answers", async () => {
+		const seen: unknown[] = [];
+		const server = await serveHttp(
+			{ name: "fake" },
+			async (request, response) => {
+				seen.push({
+					method: request.method,
+					path: request.url.pathname,
+					query: request.url.searchParams.get("q"),
+					origin: request.url.origin,
+					header: request.headers["x-many"],
+					body: new TextDecoder().decode(request.body),
+				});
+				await response.send(
+					201,
+					{ "set-cookie": "a=1\nb=2", "x-reply": "yes" },
+					new Uint8Array([111, 107]),
+				);
+			},
+		);
+		servers.push(server);
+		const answer = await fetch(`${server.url}/things?q=1`, {
+			method: "POST",
+			headers: [
+				["x-many", "one"],
+				["x-many", "two"],
+			],
+			body: "sent",
+		});
+		expect(answer.status).toBe(201);
+		expect(await answer.text()).toBe("ok");
+		// Two cookies stay two: joined, they would be one cookie no browser reads.
+		expect(answer.headers.getSetCookie()).toEqual(["a=1", "b=2"]);
+		expect(answer.headers.get("x-reply")).toBe("yes");
+		expect(seen).toEqual([
+			{
+				method: "POST",
+				path: "/things",
+				query: "1",
+				origin: server.url,
+				header: "one, two",
+				body: "sent",
+			},
+		]);
+	});
+
+	it("drops the connection on reset, as a network failure would", async () => {
+		const server = await serveHttp({ name: "fake" }, (_request, response) =>
+			response.reset(),
+		);
+		servers.push(server);
+		await expect(fetch(`${server.url}/`)).rejects.toThrow();
+	});
+
+	it("answers 500 for a handler that throws before answering, naming the server", async () => {
+		const server = await serveHttp({ name: "fake ledger" }, () => {
+			throw new Error("bug in the fake");
+		});
+		servers.push(server);
+		const answer = await fetch(`${server.url}/`);
+		expect(answer.status).toBe(500);
+		expect(await answer.text()).toBe(
+			"wirestage: fake ledger failed: bug in the fake",
+		);
+		const rejecting = await serveHttp({ name: "fake" }, async () => {
+			throw "not an Error";
+		});
+		servers.push(rejecting);
+		expect(await (await fetch(`${rejecting.url}/`)).text()).toBe(
+			"wirestage: fake failed: not an Error",
+		);
+	});
+
+	it("ends a response cut short when its handler throws after answering began", async () => {
+		const server = await serveHttp(
+			{ name: "fake" },
+			async (_request, response) => {
+				await response.send(200, {}, "complete");
+				throw new Error("after the answer");
+			},
+		);
+		servers.push(server);
+		// What was sent stays sent; nothing else is written over it.
+		expect(await (await fetch(`${server.url}/`)).text()).toBe("complete");
 	});
 });
 

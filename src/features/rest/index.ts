@@ -20,4 +20,6 @@ export type {
 	RestResolver,
 	RestRoute,
 	RestRouteOptions,
+	RestServeOptions,
+	RestServer,
 } from "./model/types.js";

@@ -25,6 +25,11 @@ export interface RestOptions {
 	readonly record?: boolean | UrlMatcher;
 }
 
+/**
+ * A request a route is deciding about. For a request a served fake received
+ * (`serve()`), `page` is undefined, `context` is empty and `resourceType` is
+ * `other`.
+ */
 export interface RestRequest extends HttpRequestView {
 	/** `:name` segments of the matched path. */
 	readonly params: Readonly<Record<string, string>>;
@@ -69,6 +74,38 @@ export interface RestCall {
 	readonly response: Frame | undefined;
 	/** The HTTP status; undefined for an aborted or unfinished request. */
 	readonly status: number | undefined;
+	/** The served fake that received it (its URL); undefined for a page's. */
+	readonly server: string | undefined;
+}
+
+export interface RestServeOptions {
+	/** 0, the default, picks a free port. A fixed port that is taken fails, naming the server. */
+	readonly port?: number;
+	/** Default 127.0.0.1. */
+	readonly host?: string;
+	/** Names the server in errors, 404s and logs. Default `<plugin> server`. */
+	readonly name?: string;
+	/** A path prefix the server's routes are relative to. */
+	readonly baseURL?: string;
+}
+
+/**
+ * A fake HTTP backend for clients outside the browser — a service under
+ * test, an agent — routed and recorded like the page's own requests. A route
+ * that passes a request through hands it to the next older route; with none
+ * left, the server answers 404.
+ */
+export interface RestServer
+	extends Pick<RestApi, "on" | "get" | "post" | "put" | "patch" | "delete"> {
+	readonly url: string;
+	readonly port: number;
+	/** This server's calls, oldest first. */
+	calls(filter?: {
+		readonly method?: string;
+		readonly path?: RestPath;
+	}): Promise<RestCall[]>;
+	/** Stop accepting and drop open connections. The stage closes it too. */
+	close(): Promise<void>;
 }
 
 export type RestPath = string | RegExp;
@@ -105,9 +142,11 @@ export interface RestApi {
 		resolver: RestResolver,
 		options?: RestRouteOptions,
 	): Promise<RestRoute>;
-	/** Recorded REST exchanges, oldest first. */
+	/** Recorded REST exchanges, oldest first: the pages' and served fakes'. */
 	calls(filter?: {
 		readonly method?: string;
 		readonly path?: RestPath;
 	}): Promise<RestCall[]>;
+	/** Serve routes on a port of their own, for clients outside the browser. */
+	serve(options?: RestServeOptions): Promise<RestServer>;
 }

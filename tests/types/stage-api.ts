@@ -64,6 +64,11 @@ export const cursor: Promise<readonly unknown[]> = stage
 	.cursor({ page: "p1" })
 	.take();
 
+// A served fake has the page's route API.
+export const served = stage.rest
+	.serve({ name: "fake backend" })
+	.then((server) => server.get("/x/:id", { kind: "passthrough" }));
+
 // A stage type can be named for helpers that take one.
 export function helper(
 	s: Stage<readonly [ReturnType<typeof webrtc>]>,

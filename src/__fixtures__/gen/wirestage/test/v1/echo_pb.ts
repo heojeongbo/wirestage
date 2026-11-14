@@ -4,106 +4,117 @@
 
 // A service shaped to exercise every RPC kind the connect plugin handles.
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
+import type {
+	GenFile,
+	GenMessage,
+	GenService,
+} from "@bufbuild/protobuf/codegenv2";
+import {
+	fileDesc,
+	messageDesc,
+	serviceDesc,
+} from "@bufbuild/protobuf/codegenv2";
 
 /**
  * Describes the file wirestage/test/v1/echo.proto.
  */
-export const file_wirestage_test_v1_echo: GenFile = /*@__PURE__*/
-  fileDesc("Chx3aXJlc3RhZ2UvdGVzdC92MS9lY2hvLnByb3RvEhF3aXJlc3RhZ2UudGVzdC52MSIqCgtFY2hvUmVxdWVzdBIMCgR0ZXh0GAEgASgJEg0KBWNvdW50GAIgASgDIisKDEVjaG9SZXNwb25zZRIMCgR0ZXh0GAEgASgJEg0KBWluZGV4GAIgASgDMooDCgtFY2hvU2VydmljZRJGCgNTYXkSHi53aXJlc3RhZ2UudGVzdC52MS5FY2hvUmVxdWVzdBofLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXNwb25zZRJKCgVXYXRjaBIeLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXF1ZXN0Gh8ud2lyZXN0YWdlLnRlc3QudjEuRWNob1Jlc3BvbnNlMAESTAoHQ29sbGVjdBIeLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXF1ZXN0Gh8ud2lyZXN0YWdlLnRlc3QudjEuRWNob1Jlc3BvbnNlKAESSwoEQ2hhdBIeLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXF1ZXN0Gh8ud2lyZXN0YWdlLnRlc3QudjEuRWNob1Jlc3BvbnNlKAEwARJMCgRQZWVrEh4ud2lyZXN0YWdlLnRlc3QudjEuRWNob1JlcXVlc3QaHy53aXJlc3RhZ2UudGVzdC52MS5FY2hvUmVzcG9uc2UiA5ACAWIGcHJvdG8z");
+export const file_wirestage_test_v1_echo: GenFile =
+	/*@__PURE__*/
+	fileDesc(
+		"Chx3aXJlc3RhZ2UvdGVzdC92MS9lY2hvLnByb3RvEhF3aXJlc3RhZ2UudGVzdC52MSIqCgtFY2hvUmVxdWVzdBIMCgR0ZXh0GAEgASgJEg0KBWNvdW50GAIgASgDIisKDEVjaG9SZXNwb25zZRIMCgR0ZXh0GAEgASgJEg0KBWluZGV4GAIgASgDMooDCgtFY2hvU2VydmljZRJGCgNTYXkSHi53aXJlc3RhZ2UudGVzdC52MS5FY2hvUmVxdWVzdBofLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXNwb25zZRJKCgVXYXRjaBIeLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXF1ZXN0Gh8ud2lyZXN0YWdlLnRlc3QudjEuRWNob1Jlc3BvbnNlMAESTAoHQ29sbGVjdBIeLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXF1ZXN0Gh8ud2lyZXN0YWdlLnRlc3QudjEuRWNob1Jlc3BvbnNlKAESSwoEQ2hhdBIeLndpcmVzdGFnZS50ZXN0LnYxLkVjaG9SZXF1ZXN0Gh8ud2lyZXN0YWdlLnRlc3QudjEuRWNob1Jlc3BvbnNlKAEwARJMCgRQZWVrEh4ud2lyZXN0YWdlLnRlc3QudjEuRWNob1JlcXVlc3QaHy53aXJlc3RhZ2UudGVzdC52MS5FY2hvUmVzcG9uc2UiA5ACAWIGcHJvdG8z",
+	);
 
 /**
  * @generated from message wirestage.test.v1.EchoRequest
  */
 export type EchoRequest = Message<"wirestage.test.v1.EchoRequest"> & {
-  /**
-   * @generated from field: string text = 1;
-   */
-  text: string;
+	/**
+	 * @generated from field: string text = 1;
+	 */
+	text: string;
 
-  /**
-   * @generated from field: int64 count = 2;
-   */
-  count: bigint;
+	/**
+	 * @generated from field: int64 count = 2;
+	 */
+	count: bigint;
 };
 
 /**
  * Describes the message wirestage.test.v1.EchoRequest.
  * Use `create(EchoRequestSchema)` to create a new message.
  */
-export const EchoRequestSchema: GenMessage<EchoRequest> = /*@__PURE__*/
-  messageDesc(file_wirestage_test_v1_echo, 0);
+export const EchoRequestSchema: GenMessage<EchoRequest> =
+	/*@__PURE__*/
+	messageDesc(file_wirestage_test_v1_echo, 0);
 
 /**
  * @generated from message wirestage.test.v1.EchoResponse
  */
 export type EchoResponse = Message<"wirestage.test.v1.EchoResponse"> & {
-  /**
-   * @generated from field: string text = 1;
-   */
-  text: string;
+	/**
+	 * @generated from field: string text = 1;
+	 */
+	text: string;
 
-  /**
-   * @generated from field: int64 index = 2;
-   */
-  index: bigint;
+	/**
+	 * @generated from field: int64 index = 2;
+	 */
+	index: bigint;
 };
 
 /**
  * Describes the message wirestage.test.v1.EchoResponse.
  * Use `create(EchoResponseSchema)` to create a new message.
  */
-export const EchoResponseSchema: GenMessage<EchoResponse> = /*@__PURE__*/
-  messageDesc(file_wirestage_test_v1_echo, 1);
+export const EchoResponseSchema: GenMessage<EchoResponse> =
+	/*@__PURE__*/
+	messageDesc(file_wirestage_test_v1_echo, 1);
 
 /**
  * @generated from service wirestage.test.v1.EchoService
  */
 export const EchoService: GenService<{
-  /**
-   * @generated from rpc wirestage.test.v1.EchoService.Say
-   */
-  say: {
-    methodKind: "unary";
-    input: typeof EchoRequestSchema;
-    output: typeof EchoResponseSchema;
-  },
-  /**
-   * @generated from rpc wirestage.test.v1.EchoService.Watch
-   */
-  watch: {
-    methodKind: "server_streaming";
-    input: typeof EchoRequestSchema;
-    output: typeof EchoResponseSchema;
-  },
-  /**
-   * @generated from rpc wirestage.test.v1.EchoService.Collect
-   */
-  collect: {
-    methodKind: "client_streaming";
-    input: typeof EchoRequestSchema;
-    output: typeof EchoResponseSchema;
-  },
-  /**
-   * @generated from rpc wirestage.test.v1.EchoService.Chat
-   */
-  chat: {
-    methodKind: "bidi_streaming";
-    input: typeof EchoRequestSchema;
-    output: typeof EchoResponseSchema;
-  },
-  /**
-   * Side-effect free, so Connect clients may send it as a GET.
-   *
-   * @generated from rpc wirestage.test.v1.EchoService.Peek
-   */
-  peek: {
-    methodKind: "unary";
-    input: typeof EchoRequestSchema;
-    output: typeof EchoResponseSchema;
-  },
-}> = /*@__PURE__*/
-  serviceDesc(file_wirestage_test_v1_echo, 0);
-
+	/**
+	 * @generated from rpc wirestage.test.v1.EchoService.Say
+	 */
+	say: {
+		methodKind: "unary";
+		input: typeof EchoRequestSchema;
+		output: typeof EchoResponseSchema;
+	};
+	/**
+	 * @generated from rpc wirestage.test.v1.EchoService.Watch
+	 */
+	watch: {
+		methodKind: "server_streaming";
+		input: typeof EchoRequestSchema;
+		output: typeof EchoResponseSchema;
+	};
+	/**
+	 * @generated from rpc wirestage.test.v1.EchoService.Collect
+	 */
+	collect: {
+		methodKind: "client_streaming";
+		input: typeof EchoRequestSchema;
+		output: typeof EchoResponseSchema;
+	};
+	/**
+	 * @generated from rpc wirestage.test.v1.EchoService.Chat
+	 */
+	chat: {
+		methodKind: "bidi_streaming";
+		input: typeof EchoRequestSchema;
+		output: typeof EchoResponseSchema;
+	};
+	/**
+	 * Side-effect free, so Connect clients may send it as a GET.
+	 *
+	 * @generated from rpc wirestage.test.v1.EchoService.Peek
+	 */
+	peek: {
+		methodKind: "unary";
+		input: typeof EchoRequestSchema;
+		output: typeof EchoResponseSchema;
+	};
+}> = /*@__PURE__*/ serviceDesc(file_wirestage_test_v1_echo, 0);

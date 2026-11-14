@@ -44,3 +44,39 @@ test("routes", async ({ page, stage }) => {
   was aborted or has not finished.
 - A resolver that throws answers the page with a 500 naming the route, and
   logs the error: a bug in a test must not look like a hung request.
+
+## Fakes for clients outside the browser
+
+A service under test, an agent or a CLI talks to its HTTP backends itself, not
+through the page. `serve()` gives such a client a backend of the test's
+making, with the same routes, replies and recording as the page's:
+
+```ts
+import { createStage } from "@heojeongbo/wirestage";
+import { json, rest } from "@heojeongbo/wirestage/rest";
+
+export async function fakeMetrics() {
+	const stage = createStage({ plugins: [rest()] });
+	const metrics = await stage.rest.serve({ port: 15391, name: "fake metrics" });
+	const queries = await metrics.post("/query", (request) =>
+		json({ rows: [], echoed: request.text().length }),
+	);
+	// …start the client, which sends POST http://127.0.0.1:15391/query…
+	await queries.next(); // its first query arrived
+	const calls = await metrics.calls({ path: "/query" });
+	return { stage, calls };
+}
+```
+
+- `serve({ port, host, name, baseURL })`: a fixed `port` that is taken fails
+  with a message naming the server; 0, the default, picks a free one.
+  `baseURL` is a path prefix the routes are relative to.
+- Routes are tried newest first, as the page's are. `passthrough()` hands the
+  request to the next older route; with none left, the server answers 404.
+  `times`, `match`, `delay` and `abort` behave as they do for the page.
+- Each exchange is on the timeline: the request as `source: "network"`, the
+  answer as `source: "server"`, both with `meta.server` set to the server's
+  URL. `stage.rest.calls()` lists them with the page's; a call's `server` says
+  which fake received it, and `server.calls()` lists only its own.
+- A request a served fake received has no `page`, an empty `context` and the
+  `resourceType` `other`. The stage closes its servers when it is disposed.

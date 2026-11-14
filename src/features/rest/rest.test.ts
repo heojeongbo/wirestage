@@ -375,3 +375,253 @@ describe("rest plugin", () => {
 		expect((await everything.stage.rest.calls()).length).toBe(1);
 	});
 });
+
+describe("served fakes", () => {
+	it("answers a client outside the browser by route, and records each exchange", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve({
+			name: "fake backend",
+			baseURL: "/v1",
+		});
+		const job = await server.get("/jobs/:id", (request) =>
+			json({ id: request.params["id"], q: request.query.get("q") }),
+		);
+		await server.post("/jobs", (request) =>
+			json(
+				{ ...request.json<object>(), bytes: request.body().byteLength },
+				{ status: 201 },
+			),
+		);
+		const got = await fetch(`${server.url}/v1/jobs/j1?q=x`);
+		expect(await got.json()).toEqual({ id: "j1", q: "x" });
+		const made = await fetch(`${server.url}/v1/jobs`, {
+			method: "POST",
+			body: JSON.stringify({ a: 1 }),
+		});
+		expect(made.status).toBe(201);
+		expect(await made.json()).toEqual({ a: 1, bytes: 7 });
+		expect(job.hits).toBe(1);
+		// The request a route sees is a page's in shape, with no page.
+		expect(job.requests[0]).toMatchObject({
+			method: "GET",
+			params: { id: "j1" },
+			page: undefined,
+			context: "",
+			resourceType: "other",
+		});
+		expect(job.requests[0]?.text()).toBe("");
+		const calls = await server.calls();
+		expect(
+			calls.map((c) => [c.method, new URL(c.url).pathname, c.status, c.server]),
+		).toEqual([
+			["GET", "/v1/jobs/j1", 200, server.url],
+			["POST", "/v1/jobs", 201, server.url],
+		]);
+		expect(calls[0]?.request).toMatchObject({
+			kind: "request",
+			direction: "out",
+			source: "network",
+			endpoint: "/v1/jobs/j1",
+			correlation: "rest-1",
+		});
+		expect(calls[0]?.response).toMatchObject({
+			direction: "in",
+			source: "server",
+			correlation: "rest-1",
+		});
+		expect(calls[1]?.request.payload.json()).toEqual({ a: 1 });
+		// The plugin's calls() lists a server's too, and says whose.
+		expect(
+			(await stage.rest.calls({ method: "post" })).map((c) => c.server),
+		).toEqual([server.url]);
+		expect(await server.calls({ path: "/jobs/:id" })).toHaveLength(1);
+	});
+
+	it("passes a request on to the routes before it, then answers 404", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve();
+		await server.on("*", "/things/**", text("the catch-all"));
+		const watching = await server.get("/things/:id", passthrough());
+		expect(await (await fetch(`${server.url}/things/1`)).text()).toBe(
+			"the catch-all",
+		);
+		expect(watching.hits).toBe(1);
+		const missing = await fetch(`${server.url}/elsewhere`);
+		expect(missing.status).toBe(404);
+		expect(await missing.text()).toBe(
+			"wirestage: rest server has no route for GET /elsewhere",
+		);
+		const [, unmatched] = await server.calls();
+		expect(unmatched?.response?.meta["unmatched"]).toBe(true);
+		await watching.remove();
+		await watching.remove();
+		expect(await (await fetch(`${server.url}/things/2`)).text()).toBe(
+			"the catch-all",
+		);
+	});
+
+	it("lets a route step aside by match, and answers with an empty body", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve();
+		await server.delete("/items/:id", empty());
+		await server.delete("/items/:id", text("only for 7"), {
+			match: (request) => request.params["id"] === "7",
+		});
+		expect(
+			await (await fetch(`${server.url}/items/7`, { method: "DELETE" })).text(),
+		).toBe("only for 7");
+		const other = await fetch(`${server.url}/items/8`, { method: "DELETE" });
+		expect([other.status, await other.text()]).toEqual([204, ""]);
+	});
+
+	it("does not hand a request a route that ran out while it waited", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve();
+		await server.get("/slot", text("the fallback"));
+		const twice = await server.get("/slot", text("from the limited route"), {
+			times: 2,
+		});
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const waiting = await server.get(
+			"/slot",
+			async () => {
+				await gate;
+				return passthrough();
+			},
+			{ match: (request) => request.query.get("wait") === "1" },
+		);
+		const first = fetch(`${server.url}/slot?wait=1`).then((r) => r.text());
+		await waiting.next();
+		// While the first waits, two others use up the limited route...
+		expect(await (await fetch(`${server.url}/slot`)).text()).toBe(
+			"from the limited route",
+		);
+		expect(twice.hits).toBe(1);
+		expect(await (await fetch(`${server.url}/slot`)).text()).toBe(
+			"from the limited route",
+		);
+		release();
+		// ...so when the first passes on, the route is gone, not borrowed.
+		expect(await first).toBe("the fallback");
+		expect(twice.hits).toBe(2);
+	});
+
+	it("claims a route's last turn before its resolver waits", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve();
+		await server.get("/turn", text("always"));
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const once = await server.get(
+			"/turn",
+			async () => {
+				await gate;
+				return text("once");
+			},
+			{ times: 1 },
+		);
+		const first = fetch(`${server.url}/turn`).then((r) => r.text());
+		await once.next();
+		// The first still waits on its resolver; the second may not take it.
+		expect(await (await fetch(`${server.url}/turn`)).text()).toBe("always");
+		release();
+		expect(await first).toBe("once");
+		for (const times of [0, 1.5])
+			await expect(
+				server.get("/turn", text("x"), { times }),
+			).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+	});
+
+	it("answers 500 for a route that throws, and says so on the timeline", async () => {
+		const { stage } = await setup();
+		const server = await stage.rest.serve({ name: "fake backend" });
+		await server.get("/broken", () => {
+			throw new Error("bug in the resolver");
+		});
+		await server.put("/odd", () => {
+			throw "not an Error";
+		});
+		await server.get("/picky", text("never"), {
+			match: () => {
+				throw new Error("bug in match");
+			},
+		});
+		const broken = await fetch(`${server.url}/broken`);
+		expect(broken.status).toBe(500);
+		expect(await broken.text()).toBe(
+			'wirestage: rule "GET /broken" failed: bug in the resolver',
+		);
+		expect((await fetch(`${server.url}/picky`)).status).toBe(500);
+		expect(
+			await (await fetch(`${server.url}/odd`, { method: "PUT" })).text(),
+		).toBe('wirestage: rule "PUT /odd" failed: not an Error');
+		const faults = stage.timeline.frames({ kind: "fault" });
+		expect(
+			faults.map((f) => [f.meta["reason"], f.meta["rule"], f.meta["error"]]),
+		).toEqual([
+			["rule-error", "GET /broken", "bug in the resolver"],
+			["rule-error", "GET /picky", "bug in match"],
+			["rule-error", "PUT /odd", "not an Error"],
+		]);
+		expect(faults[0]?.meta["server"]).toBe(server.url);
+	});
+
+	it("aborts and delays as a page's routes do", async () => {
+		const clock = createManualClock();
+		const { stage } = await setup({}, clock);
+		const server = await stage.rest.serve();
+		await server.get("/gone", abort("connectionreset"));
+		const slow = await server.get("/slow", delay(500, json({ late: true })));
+		await expect(fetch(`${server.url}/gone`)).rejects.toThrow();
+		expect(stage.timeline.frames({ kind: "fault" })[0]?.meta).toMatchObject({
+			reason: "abort",
+			error: "connectionreset",
+		});
+		const answer = fetch(`${server.url}/slow`).then((r) => r.json());
+		await slow.next();
+		await clock.advance(500);
+		expect(await answer).toEqual({ late: true });
+	});
+
+	it("names itself when its port is taken, and closes with the stage", async () => {
+		const { stage } = await setup();
+		const first = await stage.rest.serve();
+		await expect(
+			stage.rest.serve({ port: first.port, name: "fake registry" }),
+		).rejects.toMatchObject({
+			code: "INVALID_STATE",
+			message: `fake registry: 127.0.0.1:${first.port} is already in use`,
+		});
+		const second = await stage.rest.serve({ host: "127.0.0.1" });
+		await second.close();
+		await second.close();
+		await expect(fetch(`${second.url}/`)).rejects.toThrow();
+		await stage.dispose();
+		await expect(fetch(`${first.url}/`)).rejects.toThrow();
+	});
+
+	it("keeps two instances' exchanges apart", async () => {
+		const stage = createStage({
+			plugins: [rest(), named("billing", rest())],
+		});
+		stages.push(stage);
+		const own = await stage.rest.serve();
+		const billing = await stage.billing.serve();
+		await own.get("/x", text("own"));
+		await billing.get("/x", text("billing"));
+		await fetch(`${own.url}/x`);
+		await fetch(`${billing.url}/x`);
+		expect((await own.calls()).map((c) => c.correlation)).toEqual(["rest-1"]);
+		expect((await billing.calls()).map((c) => c.correlation)).toEqual([
+			"billing-1",
+		]);
+		expect((await stage.billing.calls()).map((c) => c.server)).toEqual([
+			billing.url,
+		]);
+	});
+});

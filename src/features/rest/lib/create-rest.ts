@@ -5,15 +5,18 @@ import {
 	type WirePlugin,
 } from "../../../entities/plugin/index.js";
 import { createArrivals } from "../../../shared/lib/async/index.js";
+import { createSequence } from "../../../shared/lib/id/index.js";
 import type {
 	RestApi,
 	RestMethod,
 	RestOptions,
 	RestReply,
 	RestRequest,
+	RestServer,
 } from "../model/types.js";
-import { assembleCalls } from "./calls.js";
+import { filterCalls } from "./calls.js";
 import { compilePath } from "./path.js";
+import { serveRest } from "./serve.js";
 
 /**
  * REST and other plain HTTP: routes by method and path with `:params`, replies
@@ -27,6 +30,9 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 			const { name } = context;
 			/** The record rule being added, once: every context gets it. */
 			let recording: Promise<unknown> | undefined;
+			const servers = new Set<RestServer>();
+			// Under the plugin's own name: two instances never share an id.
+			const servedCorrelation = createSequence(`${name}-`);
 
 			const toOutcome = async (reply: RestReply): Promise<HttpOutcome> => {
 				switch (reply.kind) {
@@ -125,24 +131,34 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 				delete: verb("DELETE"),
 				async calls(filter = {}) {
 					await context.sync();
-					const matcher =
-						filter.path === undefined
-							? undefined
-							: compilePath(filter.path, options.baseURL);
-					const wanted = filter.method?.toUpperCase();
-					return assembleCalls(
+					return filterCalls(
 						context.timeline.frames({ protocol: name }),
-					).filter(
-						(call) =>
-							(wanted === undefined || wanted === call.method) &&
-							(matcher === undefined ||
-								matcher.match(new URL(call.url)) !== undefined),
+						filter,
+						options.baseURL,
 					);
+				},
+				async serve(serveOptions = {}) {
+					const server = await serveRest(
+						{
+							protocol: name,
+							timeline: context.timeline,
+							clock: context.clock,
+							log: context.log,
+							correlation: servedCorrelation,
+							onClose: (closed) => servers.delete(closed),
+						},
+						serveOptions,
+					);
+					servers.add(server);
+					return server;
 				},
 			};
 
 			return {
 				api,
+				async dispose() {
+					await Promise.all([...servers].map((server) => server.close()));
+				},
 				async attach() {
 					if (options.record === undefined || options.record === false) return;
 					const base = compilePath(`${options.baseURL ?? ""}/**`, undefined);

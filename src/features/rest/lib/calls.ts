@@ -1,5 +1,27 @@
 import type { Frame } from "../../../entities/frame/index.js";
-import type { RestCall } from "../model/types.js";
+import type { RestCall, RestPath } from "../model/types.js";
+import { compilePath } from "./path.js";
+
+export interface CallFilter {
+	readonly method?: string;
+	readonly path?: RestPath;
+}
+
+/** The calls of `frames` a `calls()` filter asks for. */
+export function filterCalls(
+	frames: readonly Frame[],
+	filter: CallFilter,
+	baseURL: string | undefined,
+): RestCall[] {
+	const matcher =
+		filter.path === undefined ? undefined : compilePath(filter.path, baseURL);
+	const wanted = filter.method?.toUpperCase();
+	return assembleCalls(frames).filter(
+		(call) =>
+			(wanted === undefined || wanted === call.method) &&
+			(matcher === undefined || matcher.match(new URL(call.url)) !== undefined),
+	);
+}
 
 /**
  * Pair each recorded request with how it ended. One call per exchange,
@@ -25,6 +47,10 @@ export function assembleCalls(frames: readonly Frame[]): RestCall[] {
 			request,
 			response: end?.kind === "response" ? end : undefined,
 			status: typeof status === "number" ? status : undefined,
+			server:
+				typeof request.meta["server"] === "string"
+					? request.meta["server"]
+					: undefined,
 		});
 	}
 	return calls;

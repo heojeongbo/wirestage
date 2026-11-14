@@ -62,7 +62,7 @@ ones you use.
 
 | Subpath | Plugin | Fakes | Records | Faults | Extra peers |
 | --- | --- | --- | --- | --- | --- |
-| `/rest` | `rest()` | routes with `:params`, `json`/`text`/`bytes` replies | requests and real responses | abort, delay, status | — |
+| `/rest` | `rest()` | routes with `:params`, `json`/`text`/`bytes` replies; servers for clients outside the browser | requests and real responses | abort, delay, status | — |
 | `/connect` | `connect()` | Connect, gRPC-web: unary, server streams, whole services | decoded messages and status | fail, abort, hold, cut | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf` |
 | `/sse` | `sse()` | event streams driven from the test | events sent | end, cut | — |
 | `/websocket` | `websocket()` | a fake server, or a proxy in front of the real one | both directions | drop, close | — |
