@@ -42,10 +42,12 @@ an upward import, a cross-slice import (except `entities/<a>/@x/<b>.ts`), a
 deep import past a unit's `index.ts`, `model` importing `lib`, anything but an
 entrypoint importing a feature, Playwright anywhere but `app/playwright` (and
 there only as `import type`), Connect or protobuf outside `features/connect`,
-log-palette outside `shared/lib/logger`, and Node built-ins outside
-`shared/api` and `features/connect`. It walks the whole syntax tree: dynamic
-imports, `require` and `import("…")` types count. See
-[docs/architecture.md](docs/architecture.md). A new rule gets a test case.
+log-palette outside `shared/lib/logger`, Node built-ins outside
+`shared/api` and `features/connect`, a unit re-exporting another unit, an
+entrypoint holding anything but `export … from`, and a file under `src` that
+is not TypeScript. It reads every file and walks the whole syntax tree:
+dynamic imports, `require`, `import("…")` types and `getBuiltinModule` count.
+See [docs/architecture.md](docs/architecture.md). A new rule gets a test case.
 
 **Plugins never see Playwright or the browser context.** They get a
 `PluginContext` and return decisions (`HttpOutcome`) or handle a `SocketView`.

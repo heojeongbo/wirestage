@@ -58,9 +58,13 @@ export const typed: Promise<unknown> = stage.graphql.operation("Rooms", { rooms:
 | `log` | A logger scoped to the plugin's `scope`. |
 | `attachments()`, `baseURL` | The attached contexts: an id, a base URL and a cookie jar each. |
 
+These are the services and nothing more: the engines behind them attach,
+detach and settle at the stage's say, not a plugin's.
+
 Return `attach`, `detach` and `dispose` hooks when the plugin holds per-context
-or global resources. They get an `Attachment`, not the browser context:
-anything a plugin needs from the browser is a service on the context.
+or global resources. They get an `Attachment` — a frozen view with the
+context's id, base URL and a jar that reads and adds cookies — not the browser
+context: anything a plugin needs from the browser is a service on the context.
 
 ## HTTP rules
 
@@ -87,7 +91,9 @@ The router guarantees the rest, so a plugin does not have to:
 - `onPassthroughResponse` and `onPassthroughFailure` report what the network
   did with a request the rule passed on — not what another rule answered.
 - A rule that throws answers 500 with its `label` and is logged; nothing is
-  left hanging and nothing rejects into Playwright.
+  left hanging and nothing rejects into Playwright. A `url` predicate that
+  throws counts as no match for that rule, and is logged: the predicate runs
+  for every request of the context, and one bug must not take them all.
 
 A response that stays open is a `ResponseStream`: set the head, write chunks
 at the test's pace, then `end()` or `cut()`.

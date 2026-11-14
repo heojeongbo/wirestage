@@ -197,10 +197,14 @@ own request context does: the cookies a response sets — an error response
 included — are kept there, scoped to the site the call went to. `session:
 null` sends none. Calls a client makes are recorded with `caller: "test"`.
 
-Outside a stage, `createRpcClient(service, { baseURL, protocol, headers, session })`
-does the same. Errors are `ConnectError`s with the server's code; `statusOf`
-reads a call's code (0 when it resolved) and rethrows anything that is not a
-`ConnectError`.
+A stage's clients are closed with the stage. Outside a stage,
+`createRpcClient(service, { baseURL, protocol, headers, session })` does the
+same; over gRPC it holds an HTTP/2 connection that connect-node keeps for 15
+minutes once idle. That does not keep the process alive, but a server in the
+same process waits for it before it finishes closing.
+
+Errors are `ConnectError`s with the server's code; `statusOf` reads a call's
+code (0 when it resolved) and rethrows anything that is not a `ConnectError`.
 
 ## Fakes for clients outside the browser
 

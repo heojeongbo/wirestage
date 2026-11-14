@@ -25,8 +25,9 @@ test("routes", async ({ page, stage }) => {
 | `baseURL` | none | A path prefix (`/api/v1`) or an origin (`https://api.example.test`) that routes are relative to. |
 | `record` | off | Record requests no route answers, with their real responses: `true` for everything under `baseURL`, or a URL matcher. |
 
-- Paths take `:name` params, `*` for one segment and `**` for any number,
-  relative to `baseURL`; a pattern with a scheme
+- Paths take `:name` params, `*` for one segment, `**` for any number (so
+  `/a/**/b` matches `/a/b` too) and `{a,b}` for either — the glob every URL
+  pattern of the library takes — relative to `baseURL`; a pattern with a scheme
   (`https://api.example.test/x`) matches origin and path. A RegExp matches
   the path, and its named groups become `params`.
 - The query never takes part in matching, so a route for `/search` answers

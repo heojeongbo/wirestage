@@ -38,9 +38,9 @@ A slice holds `index.ts` (its public API), `model/` (its types) and `lib/`
 
 Where files may be:
 
-- **S1.** A source file is a package entrypoint (`src/<name>.ts`) or sits in a
-  unit: a slice `<layer>/<slice>/…` or a shared module
-  `shared/<api|lib>/<module>/…`.
+- **S1.** Every file under `src` is TypeScript, and is a package entrypoint
+  (`src/<name>.ts`) or sits in a unit: a slice `<layer>/<slice>/…` or a
+  shared module `shared/<api|lib>/<module>/…`.
 - **S2.** A unit has one `index.ts`, at its root.
 - **S3.** A slice holds `index.ts` and FSD segments (`api`, `config`, `lib`,
   `model`, `ui`); an entity may also hold `@x`.
@@ -54,14 +54,16 @@ What may import what:
    `entities/frame/@x/plugin.ts`, a file that exists to make that single
    dependency explicit, and nobody else may import it.
 3. Anything outside a unit goes through its `index.ts`; anything inside goes
-   around it.
+   around it. A unit re-exports only its own modules, so a port cannot reach a
+   feature under another unit's name.
 4. In a slice, `model` does not import `lib`: types do not depend on code.
 5. **The core knows no protocol.** Only a package entrypoint imports a
    feature — not the stage, not the fixture.
 6. `shared/lib` is pure: it does not import `shared/api`.
-7. An entrypoint re-exports public APIs and nothing else: `index.ts` what lies
-   below the features, `playwright.ts` the fixture, `<name>.ts` the feature of
-   that name. Importing the core therefore never loads a protocol's peers.
+7. An entrypoint is `export … from` statements and nothing else: `index.ts`
+   re-exports what lies below the features, `playwright.ts` the fixture,
+   `<name>.ts` the feature of that name. Importing the core therefore never
+   loads a protocol's peers.
 
 Third-party code has its own rules, because that is where a clean
 architecture usually leaks:
@@ -82,11 +84,17 @@ architecture usually leaks:
     plugin contract is written without Node.
 12. There is no other dependency.
 13. **A plugin is never handed the browser context.** Below the stage, the
-    only Playwright ports are `PagePort` and `CookieJarPort`, as types.
+    only Playwright ports are `PagePort` and `CookieJarPort`, as types. At
+    runtime too: a plugin gets a frozen view of each context — its id, base
+    URL and a jar that reads and adds cookies — and the engines' services,
+    not the engines.
 14. A module specifier is a string literal, and there is no `require`.
+    `process.getBuiltinModule()` counts as an import.
 
 Tests and `src/__fixtures__` are not shipped and not held to these rules, but
-shipped code may not import them.
+shipped code may not import them. The checker reads syntax, not types: an
+alias of a port defined in another module, or a Node global such as
+`Buffer`, is not traced.
 
 ## The engines
 
@@ -144,8 +152,11 @@ module's `onDetach` and removes the hooks.
 ## Lifecycle
 
 `attach` installs page hooks, then routes, then runs the plugins' `attach`
-hooks; a failure at any step undoes the ones before it. `detach` and `dispose`
-run every step even when one throws, and report what failed at the end.
+hooks; a failure at any step undoes the ones before it. A `detach` (or
+`dispose`, or the context closing) while an attach is still installing waits
+for it, then undoes all of it; that attach rejects with `INVALID_STATE`.
+`detach` and `dispose` run every step even when one throws, and report what
+failed at the end.
 Closing a context detaches it.
 
 ## Where new code goes
