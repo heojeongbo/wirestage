@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 (2026-11-14)
+
+- `rest.serve()`: a fake HTTP backend for clients outside the browser — a
+  service under test, an agent — with the routes, replies and recording the
+  page's requests get. Its exchanges are on the stage's timeline
+  (`source: "network"` in, `"server"` out, `meta.server` its URL), and a REST
+  call now says which server received it (`call.server`).
+
 ## 0.2.0 (2026-11-14)
 
 - `stage.cursor(filter)`: a reading position of its own, for a helper that
