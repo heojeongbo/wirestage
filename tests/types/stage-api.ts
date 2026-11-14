@@ -56,6 +56,14 @@ const graphql = definePlugin({
 });
 export const query = createStage({ plugins: [graphql] }).graphql.query;
 
+// A marker takes options; meta goes inside them.
+export const marked = stage.mark("checkpoint", { meta: { step: 1 } });
+// @ts-expect-error: meta is no longer the second argument itself
+export const bare = stage.mark("checkpoint", { step: 1 });
+export const cursor: Promise<readonly unknown[]> = stage
+	.cursor({ page: "p1" })
+	.take();
+
 // A stage type can be named for helpers that take one.
 export function helper(
 	s: Stage<readonly [ReturnType<typeof webrtc>]>,

@@ -78,6 +78,29 @@ export async function reads(stage: Stage) {
 Filters combine field equality with `endpoint: RegExp`, `after: seq` and a
 `where` predicate, which runs last so the cheap fields filter first.
 
+`drain` is one reading position for the whole stage. A helper that keeps a log
+of its own — per page, per channel, per check — takes a cursor instead, and a
+marker can carry the page it is about, so that page's reads include it:
+
+```ts
+import type { Page } from "@playwright/test";
+import type { Stage } from "@heojeongbo/wirestage";
+
+export async function pageLog(stage: Stage, page: Page) {
+	const log = stage.cursor({ page: stage.pageId(page) });
+	await stage.mark("before click", { page });
+	await page.getByRole("button", { name: "Send" }).click();
+	// What this page did since the previous take, its markers included; the
+	// stage's drain and every other cursor stay where they were.
+	const entries = await log.take();
+	const pending = await log.peek(); // the same read, without moving
+	return { entries, pending };
+}
+```
+
+A cursor starts at the beginning of the timeline, as `drain` does, and a take
+moves past everything that arrived, matching or not.
+
 A read is a snapshot. A response from the real backend is on the timeline once
 the browser has received all of it, so a test that reads right after the page's
 `fetch()` resolved — headers only — may be early: `waitFor` the response frame

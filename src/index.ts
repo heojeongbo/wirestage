@@ -102,9 +102,11 @@ export type { UrlMatcher } from "./shared/lib/match/index.js";
 export { compileUrlMatcher } from "./shared/lib/match/index.js";
 export type {
 	AttachOptions,
+	MarkOptions,
 	ReportOptions,
 	Stage,
 	StageCore,
+	StageCursor,
 	StageOptions,
 	StageReport,
 } from "./widgets/stage/index.js";

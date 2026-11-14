@@ -55,6 +55,34 @@ export interface StageReport {
 	readonly text: string;
 }
 
+export interface MarkOptions {
+	/**
+	 * The page the marker is about. The marker carries its id, so a read
+	 * narrowed to that page (`{ page }`) includes it.
+	 */
+	readonly page?: PagePort | string;
+	/** Anything else worth keeping on the marker. */
+	readonly meta?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * A reading position of its own on the timeline: what a helper that keeps a
+ * log per page, per channel or per check reads from, without moving the
+ * stage's `drain` or another cursor.
+ */
+export interface StageCursor {
+	/**
+	 * Bring the timeline up to date, then take what reached it since this
+	 * cursor last took — narrowed by the cursor's filter and `filter` — and
+	 * move past all of it, matching or not.
+	 */
+	take(filter?: FrameFilter): Promise<Frame[]>;
+	/** The same frames as `take`, without moving. */
+	peek(filter?: FrameFilter): Promise<Frame[]>;
+	/** The `seq` the cursor has read up to; 0 before its first take. */
+	readonly position: number;
+}
+
 export interface ReportOptions {
 	/** Frames kept, counting back from the newest. Default 1,000. */
 	readonly limit?: number;
@@ -90,7 +118,12 @@ export interface StageCore {
 	/** Frames since the previous `drain` (any filter), narrowed by `filter`. */
 	drain(filter?: FrameFilter): Promise<Frame[]>;
 	/** Put a named marker on the timeline, after everything that happened so far. */
-	mark(name: string, meta?: Readonly<Record<string, unknown>>): Promise<Frame>;
+	mark(name: string, options?: MarkOptions): Promise<Frame>;
+	/**
+	 * A cursor of its own, from the start of the timeline: every `take`
+	 * returns what is new since the previous one.
+	 */
+	cursor(filter?: FrameFilter): StageCursor;
 	/** Frames after the most recent marker called `marker`. */
 	since(marker: string, filter?: FrameFilter): Promise<Frame[]>;
 	/** Frames between two markers, exclusive. */

@@ -41,6 +41,7 @@ const RESERVED = new Set<string>([
 	"frames",
 	"drain",
 	"mark",
+	"cursor",
 	"since",
 	"between",
 	"waitFor",
@@ -123,6 +124,7 @@ export function createStage<const Plugins extends readonly AnyWirePlugin[]>(
 		timeline,
 		clock,
 		sync,
+		pageId,
 		wait: {
 			timeout: options.wait?.timeout ?? 5_000,
 			interval: options.wait?.interval ?? 25,

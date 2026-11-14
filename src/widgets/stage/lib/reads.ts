@@ -4,6 +4,7 @@ import type {
 	Timeline,
 } from "../../../entities/frame/index.js";
 import type { WaitForOptions } from "../../../entities/plugin/index.js";
+import type { PagePort } from "../../../shared/api/playwright/index.js";
 import type { Clock } from "../../../shared/lib/clock/index.js";
 import { WirestageError } from "../../../shared/lib/errors/index.js";
 import type { StageCore } from "../model/stage.js";
@@ -13,6 +14,8 @@ export interface ReadsDeps {
 	readonly clock: Clock;
 	/** Flush every page buffer into the timeline. */
 	readonly sync: () => Promise<void>;
+	/** The id frames use for a page. */
+	readonly pageId: (page: PagePort) => string;
 	/** Defaults for `waitFor`, in milliseconds. */
 	readonly wait: { readonly timeout: number; readonly interval: number };
 }
@@ -26,7 +29,14 @@ const REPORT_LIMIT = 1_000;
 
 export type StageReads = Pick<
 	StageCore,
-	"frames" | "drain" | "mark" | "since" | "between" | "waitFor" | "report"
+	| "frames"
+	| "drain"
+	| "mark"
+	| "cursor"
+	| "since"
+	| "between"
+	| "waitFor"
+	| "report"
 >;
 
 /**
@@ -58,16 +68,48 @@ export function createReads(deps: ReadsDeps): StageReads {
 			await sync();
 			return drainCursor.take(filter);
 		},
-		async mark(name, meta) {
+		async mark(name, options = {}) {
 			await sync();
+			const { page, meta } = options;
 			return timeline.append({
 				protocol: "wirestage",
 				kind: "marker",
 				direction: "none",
 				endpoint: name,
 				source: "test",
+				...(page === undefined
+					? {}
+					: { page: typeof page === "string" ? page : deps.pageId(page) }),
 				...(meta === undefined ? {} : { meta }),
 			});
+		},
+		cursor(base = {}) {
+			let position = 0;
+			const read = async (filter: FrameFilter) => {
+				await sync();
+				const where = filter.where;
+				return timeline.frames({
+					...base,
+					...filter,
+					after: Math.max(position, base.after ?? 0, filter.after ?? 0),
+					where: (frame) =>
+						(base.where === undefined || base.where(frame)) &&
+						(where === undefined || where(frame)),
+				});
+			};
+			return {
+				async take(filter = {}) {
+					const frames = await read(filter);
+					// Past everything that arrived, not just what matched: the next
+					// take starts where this one looked.
+					position = Math.max(position, timeline.last()?.seq ?? 0);
+					return frames;
+				},
+				peek: (filter = {}) => read(filter),
+				get position() {
+					return position;
+				},
+			};
 		},
 		async since(marker, filter) {
 			await sync();

@@ -57,6 +57,14 @@ function probe<const Name extends string = "probe">(
 
 const marker = (name: string) => ({ kind: "marker" as const, endpoint: name });
 
+const request = (endpoint: string) => ({
+	protocol: "rest",
+	kind: "request" as const,
+	direction: "out" as const,
+	endpoint,
+	source: "page" as const,
+});
+
 const append = (
 	stage: { timeline: PluginContext["timeline"] },
 	endpoint: string,
@@ -476,7 +484,7 @@ describe("stage reads", () => {
 	it("reads around markers", async () => {
 		const stage = createStage({ plugins: [] });
 		append(stage, "/before");
-		const start = await stage.mark("start", { step: 1 });
+		const start = await stage.mark("start", { meta: { step: 1 } });
 		append(stage, "/inside");
 		append(stage, "/also");
 		await stage.mark("end");
@@ -513,6 +521,75 @@ describe("stage reads", () => {
 			code: "INVALID_ARGUMENT",
 		});
 		expect((await stage.frames(marker("start"))).length).toBe(1);
+	});
+
+	it("puts a page's marker in that page's reads", async () => {
+		const stage = createStage({ plugins: [] });
+		const context = createFakeContext();
+		await stage.attach(context);
+		const page = context.newPage();
+		const id = stage.pageId(page);
+		stage.timeline.append({ ...request("/mine"), page: id });
+		append(stage, "/elsewhere");
+		await stage.mark("by page", { page });
+		await stage.mark("by id", {
+			page: "p9",
+			meta: { why: "a page's own log" },
+		});
+		await stage.mark("for nobody");
+		expect((await stage.frames({ page: id })).map((f) => f.endpoint)).toEqual([
+			"/mine",
+			"by page",
+		]);
+		expect(await stage.frames(marker("by id"))).toMatchObject([
+			{ page: "p9", meta: { why: "a page's own log" } },
+		]);
+		expect((await stage.frames(marker("for nobody")))[0]?.page).toBeUndefined();
+		await stage.dispose();
+	});
+
+	it("keeps a cursor's position apart from drain and from other cursors", async () => {
+		const stage = createStage({ plugins: [] });
+		const p1 = stage.cursor({ page: "p1" });
+		const everything = stage.cursor();
+		expect(p1.position).toBe(0);
+		stage.timeline.append({ ...request("/a"), page: "p1" });
+		append(stage, "/b");
+		// From the start of the timeline, like drain.
+		expect((await p1.peek()).map((f) => f.endpoint)).toEqual(["/a"]);
+		expect((await p1.take()).map((f) => f.endpoint)).toEqual(["/a"]);
+		// Past everything that arrived, not only what matched.
+		expect(p1.position).toBe(2);
+		expect(await p1.take()).toEqual([]);
+		stage.timeline.append({ ...request("/c"), page: "p1" });
+		stage.timeline.append({ ...request("/d"), page: "p1" });
+		// A take narrows further, and still moves past all of it.
+		expect(
+			(await p1.take({ where: (f) => f.endpoint === "/d" })).map(
+				(f) => f.endpoint,
+			),
+		).toEqual(["/d"]);
+		expect(await p1.peek()).toEqual([]);
+		// The other readers never moved.
+		expect((await everything.take()).map((f) => f.endpoint)).toEqual([
+			"/a",
+			"/b",
+			"/c",
+			"/d",
+		]);
+		expect((await stage.drain()).length).toBe(4);
+		// A cursor's own filter and a take's combine, `after` included.
+		const late = stage.cursor({
+			after: 3,
+			where: (f) => f.endpoint !== "/c",
+		});
+		expect((await late.take({ after: 1 })).map((f) => f.endpoint)).toEqual([
+			"/d",
+		]);
+		// Nothing after a clear moves it back.
+		stage.timeline.clear();
+		expect(await late.take()).toEqual([]);
+		expect(late.position).toBe(4);
 	});
 
 	it("says when a missing marker may have been dropped at capacity", async () => {
