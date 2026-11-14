@@ -163,16 +163,69 @@ describe("websocket mock", () => {
 		});
 	});
 
-	it("logs a failing onConnect without breaking the connection", async () => {
+	it("refuses to send once the connection is over, and broadcasts to the rest", async () => {
+		const { stage, open } = await setup();
+		const mock = await stage.websocket.mock("/live");
+		const [left, stays, leaving] = [await open(), await open(), await open()];
+		const [gone, , closing] = [
+			await mock.next(),
+			await mock.next(),
+			await mock.next(),
+		];
+		left.closeFromPeer(1000, "bye");
+		await gone.closed;
+		// Playwright would drop it without a word, and the timeline would
+		// show a message the page never got.
+		expect(() => gone.send("late")).toThrow(
+			expect.objectContaining({ code: "CLOSED" }),
+		);
+		// Over from the moment the stub closes it, before the page hears:
+		// Playwright reports the close back later, the fake at once unless
+		// held.
+		vi.spyOn(leaving, "close").mockResolvedValue(undefined);
+		await closing.close();
+		expect(() => closing.send("late")).toThrow(
+			expect.objectContaining({ code: "CLOSED" }),
+		);
+		mock.broadcast("everyone");
+		expect([left.sent, stays.sent, leaving.sent]).toEqual([
+			[],
+			["everyone"],
+			[],
+		]);
+		expect(
+			shape(await stage.websocket.frames()).filter((f) =>
+				f.startsWith("message"),
+			),
+		).toEqual(["message in stub"]);
+	});
+
+	it("closes the socket when onConnect throws, and records why", async () => {
 		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 		const { stage, open } = await setup();
 		const mock = await stage.websocket.mock("/live", {
-			onConnect: () => {
+			onConnect: async (connection) => {
+				connection.send("welcome");
+				await Promise.resolve();
 				throw new Error("greeting failed");
 			},
 		});
-		await open();
-		await expect(mock.next()).resolves.toBeDefined();
+		const route = await open();
+		const connection = await mock.next();
+		const reason = 'wirestage: rule "mock /live" failed: greeting failed';
+		expect(route.closedWith).toEqual([{ code: 1011, reason }]);
+		await expect(connection.closed).resolves.toEqual({ code: 1011, reason });
+		// The stage closed it for the stub: the close is the stub's, and
+		// nothing more can be sent.
+		expect(shape(await stage.websocket.frames())).toEqual([
+			"lifecycle none page open",
+			"message in stub",
+			"fault none stub rule-error",
+			"lifecycle none stub close",
+		]);
+		expect(() => connection.send("late")).toThrow(
+			expect.objectContaining({ code: "CLOSED" }),
+		);
 		expect(logged).toHaveBeenCalled();
 	});
 
@@ -282,6 +335,41 @@ describe("websocket proxy", () => {
 			["test", 1011],
 			["page", undefined],
 		]);
+	});
+
+	it("refuses to inject once the connection is over, from either end", async () => {
+		const { stage, open } = await setup();
+		const proxy = await stage.websocket.proxy("/feed");
+		const first = await open("/feed");
+		const closedByServer = await proxy.next();
+		first.server?.closeFromPeer(4002, "server is done");
+		await closedByServer.closed;
+		const second = await open("/feed");
+		const closedByTest = await proxy.next();
+		// Over from the moment the test closes it, before either end reports
+		// the close back — which the fake does at once unless held.
+		vi.spyOn(second, "close").mockResolvedValue(undefined);
+		vi.spyOn(second.server as FakeWebSocketRoute, "close").mockResolvedValue(
+			undefined,
+		);
+		await closedByTest.close();
+		for (const connection of [closedByServer, closedByTest]) {
+			expect(() => connection.toPage("late")).toThrow(
+				expect.objectContaining({ code: "CLOSED" }),
+			);
+			expect(() => connection.toServer("late")).toThrow(
+				expect.objectContaining({ code: "CLOSED" }),
+			);
+		}
+		expect([
+			first.sent,
+			first.server?.sent,
+			second.sent,
+			second.server?.sent,
+		]).toEqual([[], [], [], []]);
+		expect(
+			(await stage.websocket.frames()).filter((f) => f.kind === "message"),
+		).toEqual([]);
 	});
 
 	it("stops proxying new connections once removed, or after `times`", async () => {

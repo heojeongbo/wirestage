@@ -1,3 +1,4 @@
+import type { Timeline } from "../../../entities/frame/index.js";
 import type {
 	SocketPeer,
 	SocketRouter,
@@ -13,6 +14,7 @@ import { compileUrlMatcher } from "../../../shared/lib/match/index.js";
 import type { AttachedContext } from "./attached-context.js";
 
 export interface SocketRouterDeps {
+	readonly timeline: Timeline;
 	readonly log: ScopedLogger;
 	readonly correlation: () => string;
 }
@@ -36,19 +38,35 @@ type CloseOptions = Parameters<SocketPeer["close"]>[0];
 const sendable = (code: number): boolean =>
 	code === 1000 || (code >= 3000 && code <= 4999);
 
+const encoder = new TextEncoder();
+
+/**
+ * A close reason cut to what a close frame carries: 123 bytes of UTF-8 (the
+ * frame's 125, less the code), ending on a whole character.
+ */
+const fitReason = (reason: string): string =>
+	// `encodeInto` stops before the first character that does not fit whole.
+	reason.slice(0, encoder.encodeInto(reason, new Uint8Array(123)).read);
+
 /**
  * A close as the server's end can carry it out. Playwright closes that end
  * with the browser's own `WebSocket.close(code, reason)`, which throws on a
- * code a script may not send, and on a reason without a code — and Playwright
- * swallows the error, which leaves the connection open for good. Such a close
- * goes out as a normal closure, 1000, with its reason: the close is the point.
+ * code a script may not send, on a reason without a code and on a reason
+ * over 123 bytes — and Playwright swallows the error, which leaves the
+ * connection open for good. Such a close goes out as a normal closure, 1000,
+ * with its reason cut to fit: the close is the point.
  */
 const forServer = (options: CloseOptions): CloseOptions => {
 	const { code, reason } = options ?? {};
-	if (code === undefined ? reason === undefined : sendable(code))
-		return options;
-	return { code: 1000, ...(reason === undefined ? {} : { reason }) };
+	if (code === undefined && reason === undefined) return options;
+	return {
+		code: code !== undefined && sendable(code) ? code : 1000,
+		...(reason === undefined ? {} : { reason: fitReason(reason) }),
+	};
 };
+
+/** The message handler of an end whose messages the rule does not take. */
+const drop = (): void => {};
 
 /**
  * Turns WebSocket rules into ONE Playwright WebSocket route per attached
@@ -101,6 +119,45 @@ export function createSocketRouter(deps: SocketRouterDeps): SocketRouterEngine {
 		onClose: (handler) => route.onClose(handler),
 	});
 
+	/**
+	 * A rule that throws is a bug in the test. Say which rule failed — in the
+	 * log, on the timeline, and in the reason the page's socket closes with —
+	 * and close both ends: the page's socket would otherwise sit open with
+	 * nobody answering it, and a server the rule connected would stay
+	 * connected. 1011 is a server's "internal error"; the server's end gets
+	 * 1000, as a script may not send 1011.
+	 */
+	const fail = async (
+		rule: SocketRule,
+		view: SocketView,
+		server: SocketPeer | undefined,
+		error: unknown,
+	): Promise<void> => {
+		const message = error instanceof Error ? error.message : String(error);
+		deps.log.error(
+			"socket rule failed",
+			{ rule: rule.label, url: view.url.href },
+			error,
+		);
+		deps.timeline.append({
+			protocol: rule.protocol,
+			kind: "fault",
+			direction: "none",
+			endpoint: view.url.pathname,
+			source: "stub",
+			correlation: view.correlation,
+			context: view.context,
+			meta: { reason: "rule-error", rule: rule.label, error: message },
+		});
+		const closing = {
+			code: 1011,
+			// Cut like the server's end, though the page's would take it whole:
+			// no real server could send the page a longer one.
+			reason: fitReason(`wirestage: rule "${rule.label}" failed: ${message}`),
+		};
+		await Promise.all([view.page.close(closing), server?.close(closing)]);
+	};
+
 	const onSocket = async (
 		attachment: AttachedContext,
 		route: WebSocketRoutePort,
@@ -115,6 +172,11 @@ export function createSocketRouter(deps: SocketRouterDeps): SocketRouterEngine {
 		}
 		entry.hits += 1;
 		if (entry.remaining !== undefined && --entry.remaining === 0) retire(entry);
+		// Playwright passes the messages of an end with no handler on to the
+		// other end, unrecorded: a rule that wires one direction would leak
+		// the other. So each end starts with a handler that drops them, which
+		// the rule's own replaces.
+		route.onMessage(drop);
 		let server: SocketPeer | undefined;
 		const view: SocketView = {
 			correlation: deps.correlation(),
@@ -122,22 +184,23 @@ export function createSocketRouter(deps: SocketRouterDeps): SocketRouterEngine {
 			context: attachment.id,
 			page: peer(route),
 			connectToServer: () => {
-				server ??= peer(route.connectToServer(), forServer);
+				if (server === undefined) {
+					const upstream = route.connectToServer();
+					upstream.onMessage(drop);
+					server = peer(upstream, forServer);
+				}
 				return server;
 			},
 		};
 		try {
-			// Awaited: Playwright opens the page's end only once this handler
-			// settles, so the rule is wired up before the first message.
+			// Awaited: Playwright opens the page's end of a socket the rule
+			// did not connect once this handler settles, so an async rule is
+			// wired up before the first message.
 			await entry.rule.open(view);
 		} catch (error) {
 			// Never rejected to Playwright, where it would surface as an
 			// unhandled rejection in whichever test runs next.
-			deps.log.error(
-				"socket rule failed",
-				{ rule: entry.rule.label, url: url.href },
-				error,
-			);
+			await fail(entry.rule, view, server, error);
 		}
 	};
 

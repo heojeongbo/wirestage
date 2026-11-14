@@ -14,7 +14,12 @@ import type {
 	WsProxyConnection,
 	WsProxyOptions,
 } from "../model/types.js";
-import { createSocketLog, encodeOutgoing, toMessage } from "./wire.js";
+import {
+	closedError,
+	createSocketLog,
+	encodeOutgoing,
+	toMessage,
+} from "./wire.js";
 
 /**
  * A pass-through to the real server that records both directions and can
@@ -92,6 +97,8 @@ export async function createProxy(
 				};
 			page.onClose(relay("page"));
 			server.onClose(relay("network"));
+			// Over from the moment the test closes it, before either end hears.
+			const over = () => closed.settled || closedBy !== undefined;
 			connections.push({
 				url: socket.url.href,
 				get messages() {
@@ -99,11 +106,13 @@ export async function createProxy(
 				},
 				nextMessage: (waitOptions) => messages.next(waitOptions),
 				toPage(data) {
+					if (over()) throw closedError(socket);
 					const encoded = encodeOutgoing(data);
 					page.send(encoded);
 					log("message", "in", "test", { injected: true }, encoded);
 				},
 				toServer(data) {
+					if (over()) throw closedError(socket);
 					const encoded = encodeOutgoing(data);
 					server.send(encoded);
 					log("message", "out", "test", { injected: true }, encoded);

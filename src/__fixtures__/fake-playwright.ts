@@ -14,8 +14,8 @@
  *   passed to `evaluate` is serialized and rebuilt there, so one that leans
  *   on module scope fails here as it would in a browser;
  * - cookies are scoped: `cookies(url)` returns only those the URL would send;
- * - a WebSocket's ends close the way Playwright's do: see
- *   `createFakeWebSocketRoute`.
+ * - a WebSocket's ends pass messages on and close the way Playwright's do:
+ *   see `createFakeWebSocketRoute`.
  */
 import type {
 	BindingSourcePort,
@@ -161,29 +161,32 @@ export interface FakeWebSocketRoute extends WebSocketRoutePort {
 	server: FakeWebSocketRoute | undefined;
 }
 
-/** `WebSocket.close()` takes 1000 or 3000-4999; anything else throws. */
 /**
  * Whether the browser's own `WebSocket.close(code, reason)` carries the
- * close out: it throws on a code outside 1000 and 3000-4999, and on a reason
- * without a code (the missing code is read as 0).
+ * close out: it throws on a code outside 1000 and 3000-4999, on a reason
+ * without a code (the missing code is read as 0), and on a reason over 123
+ * bytes of UTF-8.
  */
 const closable = (options: { code?: number; reason?: string } | undefined) =>
-	options?.code === undefined
+	(options?.reason === undefined || Buffer.byteLength(options.reason) <= 123) &&
+	(options?.code === undefined
 		? options?.reason === undefined
-		: options.code === 1000 || (options.code >= 3000 && options.code <= 4999);
+		: options.code === 1000 || (options.code >= 3000 && options.code <= 4999));
 
 /**
  * One end of a routed WebSocket, behaving as Playwright 1.60's does
  * (`webSocketMockSource` and the client's `WebSocketRoute`):
  *
+ * - with no `onMessage` handler, an end passes its messages on: the
+ *   server's to the page, the page's to the server once it is connected;
  * - every close of an end is reported to that end's `onClose` handler — the
  *   one the end started itself, and the one the route carried out, which for
  *   a close the page started means the handler runs twice;
  * - with no handler, a close is forwarded to the other end instead;
- * - the page's end takes any close code; the server's end is closed with the
- *   browser's own `WebSocket.close()`, which throws on a code outside 1000
- *   and 3000-4999 and on a reason without a code — and Playwright swallows
- *   that, so nothing closes.
+ * - the page's end takes any close code and reason; the server's end is
+ *   closed with the browser's own `WebSocket.close()`, which throws on a
+ *   code outside 1000 and 3000-4999, on a reason without a code and on a
+ *   reason over 123 bytes — and Playwright swallows that, so nothing closes.
  */
 export function createFakeWebSocketRoute(
 	url: string,
@@ -241,7 +244,8 @@ export function createFakeWebSocketRoute(
 			return route.server;
 		},
 		receive(message) {
-			onMessage?.(message);
+			if (onMessage !== undefined) onMessage(message);
+			else (page ?? route.server)?.send(message);
 		},
 		closeFromPeer(code, reason) {
 			if (state !== "open") return;

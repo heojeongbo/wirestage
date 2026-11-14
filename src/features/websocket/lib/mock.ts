@@ -11,7 +11,12 @@ import type {
 	WsMock,
 	WsMockOptions,
 } from "../model/types.js";
-import { createSocketLog, encodeOutgoing, toMessage } from "./wire.js";
+import {
+	closedError,
+	createSocketLog,
+	encodeOutgoing,
+	toMessage,
+} from "./wire.js";
 
 /** A fake server: every matching socket becomes a connection the test drives. */
 export async function createMock(
@@ -24,12 +29,14 @@ export async function createMock(
 		clock: context.clock,
 		label: "WebSocket connection",
 	});
+	/** Each connection, with whether it is over: `broadcast` skips those. */
+	const ended = new Map<WsConnection, () => boolean>();
 	const rule = await context.sockets.add({
 		protocol,
 		label: `mock ${String(url)}`,
 		url,
 		...(options.times === undefined ? {} : { times: options.times }),
-		open(socket) {
+		async open(socket) {
 			const log = createSocketLog(context, protocol, socket);
 			const messages = createArrivals<WsMessage>({
 				clock: context.clock,
@@ -58,6 +65,8 @@ export async function createMock(
 						...(reason === undefined ? {} : { reason }),
 					});
 			});
+			// Over from the moment the stub closes it, before the page hears.
+			const over = () => closed.settled || closedBy === "stub";
 			const connection: WsConnection = {
 				url: socket.url.href,
 				get messages() {
@@ -65,6 +74,7 @@ export async function createMock(
 				},
 				nextMessage: (waitOptions) => messages.next(waitOptions),
 				send(data) {
+					if (over()) throw closedError(socket);
 					const encoded = encodeOutgoing(data);
 					socket.page.send(encoded);
 					log("message", "in", "stub", {}, encoded);
@@ -76,7 +86,15 @@ export async function createMock(
 				closed: closed.promise,
 			};
 			connections.push(connection);
-			return options.onConnect?.(connection);
+			ended.set(connection, over);
+			try {
+				await options.onConnect?.(connection);
+			} catch (error) {
+				// The stage closes the socket of a rule that throws: the close
+				// the page then hears of is the stub's doing.
+				closedBy = "stub";
+				throw error;
+			}
 		},
 	});
 	return {
@@ -88,7 +106,8 @@ export async function createMock(
 		},
 		next: (waitOptions) => connections.next(waitOptions),
 		broadcast(data) {
-			for (const connection of connections.items) connection.send(data);
+			for (const [connection, isOver] of ended)
+				if (!isOver()) connection.send(data);
 		},
 		remove: () => rule.remove(),
 	};

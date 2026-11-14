@@ -95,6 +95,7 @@ export function createStage<const Plugins extends readonly AnyWirePlugin[]>(
 		correlation: createSequence("x"),
 	});
 	const sockets = createSocketRouter({
+		timeline,
 		log: createScopedLogger("Socket"),
 		correlation: createSequence("w"),
 	});

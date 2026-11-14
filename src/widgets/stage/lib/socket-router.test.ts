@@ -6,7 +6,9 @@ import {
 	type FakeContext,
 	type FakeWebSocketRoute,
 } from "../../../__fixtures__/fake-playwright.js";
+import { createTimeline } from "../../../entities/frame/index.js";
 import type { SocketRule, SocketView } from "../../../entities/plugin/index.js";
+import { createManualClock } from "../../../shared/lib/clock/index.js";
 import { createSequence } from "../../../shared/lib/id/index.js";
 import { createScopedLogger } from "../../../shared/lib/logger/index.js";
 import type { AttachedContext } from "./attached-context.js";
@@ -22,11 +24,16 @@ const attachmentOf = (id: string, context: FakeContext): AttachedContext => ({
 });
 
 function setup() {
+	const timeline = createTimeline({ clock: createManualClock() });
 	const log = createScopedLogger("Socket");
-	const router = createSocketRouter({ log, correlation: createSequence("w") });
+	const router = createSocketRouter({
+		timeline,
+		log,
+		correlation: createSequence("w"),
+	});
 	const context = createFakeContext();
 	const attachment = attachmentOf("c1", context);
-	return { log, router, context, attachment };
+	return { timeline, log, router, context, attachment };
 }
 
 function recorder(over: Partial<SocketRule> = {}) {
@@ -106,16 +113,75 @@ describe("socket router", () => {
 		expect(await closeServer({ reason: "bye" })).toEqual([
 			{ code: 1000, reason: "bye" },
 		]);
-		// What the browser accepts goes through as given.
-		expect(await closeServer({ code: 4000, reason: "bye" })).toEqual([
-			{ code: 4000, reason: "bye" },
+		// Nor a reason over the 123 bytes a close frame carries: it is cut to
+		// fit, on a whole character — "é" is two bytes, "😀" four.
+		expect(await closeServer({ code: 4000, reason: "é".repeat(100) })).toEqual([
+			{ code: 4000, reason: "é".repeat(61) },
 		]);
+		expect(
+			await closeServer({ code: 1001, reason: `${"a".repeat(121)}😀` }),
+		).toEqual([{ code: 1000, reason: "a".repeat(121) }]);
+		// What the browser accepts goes through as given.
+		expect(await closeServer({ code: 4000, reason: "b".repeat(123) })).toEqual([
+			{ code: 4000, reason: "b".repeat(123) },
+		]);
+		expect(await closeServer({ code: 4000 })).toEqual([{ code: 4000 }]);
 		expect(await closeServer({})).toEqual([{}]);
 		expect(await closeServer()).toEqual([undefined]);
-		// The page's end takes any code: a server may close with any.
+		// The page's end takes any code and any reason: Playwright closes it
+		// without asking the browser.
 		const page = (await open(context)) as FakeWebSocketRoute;
-		await (sockets.at(-1) as SocketView).page.close({ code: 1001 });
-		expect(page.closedWith).toEqual([{ code: 1001 }]);
+		await (sockets.at(-1) as SocketView).page.close({
+			code: 1001,
+			reason: "é".repeat(100),
+		});
+		expect(page.closedWith).toEqual([{ code: 1001, reason: "é".repeat(100) }]);
+	});
+
+	it("passes no message on for a rule that only connects, but passes closes on", async () => {
+		const { router, context, attachment } = setup();
+		await router.attach(attachment);
+		await router.add(
+			recorder({
+				open: (socket) => {
+					socket.connectToServer();
+				},
+			}).rule,
+		);
+		const page = (await open(context)) as FakeWebSocketRoute;
+		const server = page.server as FakeWebSocketRoute;
+		// Playwright would carry both over, and no frame would record them.
+		page.receive("up");
+		server.receive("down");
+		expect(server.sent).toEqual([]);
+		expect(page.sent).toEqual([]);
+		// A close nobody handles still reaches the other end.
+		page.closeFromPeer(4000, "bye");
+		expect(server.closedWith).toEqual([{ code: 4000, reason: "bye" }]);
+	});
+
+	it("drops the direction a rule does not wire, whichever it wires", async () => {
+		const { router, context, attachment } = setup();
+		await router.attach(attachment);
+		const { rule, sockets } = recorder();
+		await router.add(rule);
+		const pageToServer = (await open(context)) as FakeWebSocketRoute;
+		const one = sockets.at(-1) as SocketView;
+		// Set after connecting: the rule's handler replaces the one that drops.
+		const upstream = one.connectToServer();
+		one.page.onMessage((data) => upstream.send(data));
+		pageToServer.receive("up");
+		pageToServer.server?.receive("down");
+		expect(pageToServer.server?.sent).toEqual(["up"]);
+		expect(pageToServer.sent).toEqual([]);
+
+		const serverToPage = (await open(context)) as FakeWebSocketRoute;
+		const other = sockets.at(-1) as SocketView;
+		other.connectToServer().onMessage((data) => other.page.send(data));
+		serverToPage.receive("up");
+		serverToPage.server?.receive("down");
+		expect(serverToPage.server?.sent).toEqual([]);
+		expect(serverToPage.sent).toEqual(["down"]);
 	});
 
 	it("lets the newest rule take the socket, across every rule added", async () => {
@@ -232,10 +298,9 @@ describe("socket router", () => {
 		expect(sockets).toHaveLength(0);
 	});
 
-	it("waits for an async rule, and logs one that fails instead of rejecting", async () => {
-		const { router, context, attachment, log } = setup();
+	it("waits for an async rule before Playwright opens the page's end", async () => {
+		const { router, context, attachment } = setup();
 		await router.attach(attachment);
-		const error = vi.spyOn(log, "error").mockImplementation(() => {});
 		let wired = false;
 		await router.add(
 			recorder({
@@ -248,20 +313,70 @@ describe("socket router", () => {
 		await open(context);
 		// The handler Playwright awaits has settled: the rule is wired up.
 		expect(wired).toBe(true);
+	});
+
+	it("closes both ends of a socket whose rule throws, and says which rule failed", async () => {
+		const { router, context, attachment, log, timeline } = setup();
+		await router.attach(attachment);
+		const error = vi.spyOn(log, "error").mockImplementation(() => {});
 		await router.add(
 			recorder({
 				label: "broken",
-				open: () => {
+				open: async (socket) => {
+					socket.connectToServer();
+					await Promise.resolve();
 					throw new Error("bug in the rule");
 				},
 			}).rule,
 		);
-		await expect(open(context)).resolves.toBeDefined();
+		// Resolves: nothing rejects into Playwright.
+		const page = (await open(context)) as FakeWebSocketRoute;
+		const reason = 'wirestage: rule "broken" failed: bug in the rule';
+		// Not left open with nobody answering it: a server's internal error.
+		expect(page.closedWith).toEqual([{ code: 1011, reason }]);
+		// Playwright's own forwarding of that close is refused (a script may
+		// not send 1011), so the server the rule connected is closed by hand.
+		expect(page.server?.refusedCloses).toEqual([{ code: 1011, reason }]);
+		expect(page.server?.closedWith).toEqual([{ code: 1000, reason }]);
+		expect(timeline.frames()).toEqual([
+			expect.objectContaining({
+				protocol: "ws",
+				kind: "fault",
+				direction: "none",
+				source: "stub",
+				endpoint: "/live",
+				correlation: "w1",
+				context: "c1",
+				meta: {
+					reason: "rule-error",
+					rule: "broken",
+					error: "bug in the rule",
+				},
+			}),
+		]);
 		expect(error).toHaveBeenCalledWith(
 			"socket rule failed",
 			{ rule: "broken", url: "ws://app.test/live" },
 			expect.any(Error),
 		);
+
+		// Thrown before connecting, and not an Error: the page's end alone,
+		// with a reason cut to the 123 bytes a close frame carries — on a
+		// whole character, "é" being two bytes.
+		await router.add(
+			recorder({
+				label: `a${"é".repeat(60)}`,
+				open: () => {
+					throw "not an Error";
+				},
+			}).rule,
+		);
+		const second = (await open(context)) as FakeWebSocketRoute;
+		expect(second.server).toBeUndefined();
+		expect(second.closedWith).toEqual([
+			{ code: 1011, reason: `wirestage: rule "a${"é".repeat(52)}` },
+		]);
+		expect(timeline.last()?.meta).toMatchObject({ error: "not an Error" });
 	});
 
 	it("treats a URL matcher that throws as no match, for that rule alone", async () => {

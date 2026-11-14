@@ -40,6 +40,11 @@ export interface WsCloseOptions {
 	 * the server as a normal closure, 1000.
 	 */
 	readonly code?: number;
+	/**
+	 * The page gets it whole. A proxy's real server gets at most 123 bytes
+	 * of it, cut on a character: all a close frame carries, and all the
+	 * browser will send.
+	 */
 	readonly reason?: string;
 }
 
@@ -49,7 +54,10 @@ export interface WsConnection {
 	readonly messages: readonly WsMessage[];
 	/** The next message the page sends (or sent and nobody took). */
 	nextMessage(options?: { readonly timeout?: number }): Promise<WsMessage>;
-	/** Send to the page. */
+	/**
+	 * Send to the page. Throws `CLOSED` once the connection is over — from
+	 * the moment `close()` is called — since the page would never get it.
+	 */
 	send(data: WsData): void;
 	close(options?: WsCloseOptions): Promise<void>;
 	/** Resolves when the connection is over, whoever closed it. */
@@ -61,7 +69,8 @@ export interface WsMockOptions {
 	readonly times?: number;
 	/**
 	 * Called for each new connection, e.g. to send a greeting. The page's
-	 * socket opens once it settles.
+	 * socket opens once it settles. If it throws, the stage closes the
+	 * page's socket with 1011 and records a `rule-error` fault.
 	 */
 	readonly onConnect?: (connection: WsConnection) => void | Promise<void>;
 }
@@ -72,6 +81,7 @@ export interface WsMock {
 	readonly connections: readonly WsConnection[];
 	/** The next connection the page opens (or opened and nobody took). */
 	next(options?: { readonly timeout?: number }): Promise<WsConnection>;
+	/** Send to every connection that is not over yet. */
 	broadcast(data: WsData): void;
 	/** New connections go to the real server again. */
 	remove(): Promise<void>;
@@ -89,7 +99,10 @@ export interface WsProxyConnection {
 	/** Messages in both directions, oldest first. */
 	readonly messages: readonly WsMessage[];
 	nextMessage(options?: { readonly timeout?: number }): Promise<WsMessage>;
-	/** Inject a message to the page, as if the server sent it. */
+	/**
+	 * Inject a message to the page, as if the server sent it. Throws
+	 * `CLOSED` once the connection is over, as `toServer` does.
+	 */
 	toPage(data: WsData): void;
 	/** Inject a message to the server, as if the page sent it. */
 	toServer(data: WsData): void;
