@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 (2026-11-14)
+
+- `stream(open, init)`: a REST reply that stays open — a watch, a log that
+  follows, a long poll — written by the test chunk by chunk, then ended or
+  cut, on a page's route and a served fake's alike. Its head is the call's
+  response, so `calls()` has a stream's status while it is open; each chunk
+  is a `message` frame, and its end a `lifecycle` close or a `cut` fault.
+
 ## 0.3.1 (2026-11-14)
 
 - A served fake sends `content-length` on every response with a body, HEAD
