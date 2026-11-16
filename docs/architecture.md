@@ -98,8 +98,9 @@ alias of a port defined in another module, or a Node global such as
 
 ## The engines
 
-The stage builds four engines and hands plugins their contracts. Each owns one
-thing in the browser, so two plugins never install competing hooks.
+The stage builds five engines and hands plugins their contracts. Each owns one
+thing in the browser, or one kind of port, so two plugins never install
+competing hooks.
 
 | Engine (`widgets/stage/lib`) | Contract (`entities/plugin`) | Owns |
 | --- | --- | --- |
@@ -107,6 +108,7 @@ thing in the browser, so two plugins never install competing hooks.
 | `socket-router.ts` | `SocketRouter`, `SocketRule`, `SocketView` | One WebSocket route per attached context. |
 | `page-host.ts`, `page-runtime.ts` | `PageHost`, `PageModule` | One init script and one binding per attached context. |
 | `shared/api/stream-server`, written through `shared/api/http-server`'s `createResponseStream` | `ResponseStream` | Local servers for responses that stay open. A served fake writes its own through the same adapter. |
+| `shared/api/http-server`'s `createPorts` | `Ports` (`shared/api/http-server`) | The ports served fakes listen on: plain requests and WebSocket handshakes, shared between plugins on one port. The RFC 6455 server half (`websocket.ts`, `websocket-frame.ts`, `upgrade.ts`) lives there too, behind `ServedWebSocket`. |
 
 `reads.ts` is the stage's read side (`frames`, `drain`, `mark`, `since`,
 `between`, `waitFor`, `report`), and `create-stage.ts` is the composition

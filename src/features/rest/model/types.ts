@@ -118,7 +118,12 @@ export interface RestCall {
 }
 
 export interface RestServeOptions {
-	/** 0, the default, picks a free port. A fixed port that is taken fails, naming the server. */
+	/**
+	 * 0, the default, picks a free port. A fixed port that is taken fails,
+	 * naming the server — unless one of this stage's WebSocket servers
+	 * listens there (`websocket.serve()`): the two then share it, plain
+	 * requests coming here and WebSocket handshakes going there.
+	 */
 	readonly port?: number;
 	/** Default 127.0.0.1. */
 	readonly host?: string;

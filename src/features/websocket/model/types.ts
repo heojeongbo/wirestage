@@ -52,6 +52,8 @@ export interface WsConnection {
 	readonly url: string;
 	/** Messages the page sent, oldest first. */
 	readonly messages: readonly WsMessage[];
+	/** True until either side starts to close it. */
+	readonly open: boolean;
 	/** The next message the page sends (or sent and nobody took). */
 	nextMessage(options?: { readonly timeout?: number }): Promise<WsMessage>;
 	/**
@@ -81,8 +83,8 @@ export interface WsMock {
 	readonly connections: readonly WsConnection[];
 	/** The next connection the page opens (or opened and nobody took). */
 	next(options?: { readonly timeout?: number }): Promise<WsConnection>;
-	/** Send to every connection that is not over yet. */
-	broadcast(data: WsData): void;
+	/** Send to every connection still open; returns how many that was. */
+	broadcast(data: WsData): number;
 	/** New connections go to the real server again. */
 	remove(): Promise<void>;
 }
@@ -124,6 +126,75 @@ export interface WsProxy {
 	remove(): Promise<void>;
 }
 
+export interface WsServeOptions {
+	/**
+	 * 0, the default, picks a free port. A fixed port that is taken fails,
+	 * naming the server — unless one of this stage's REST fakes listens
+	 * there (`rest.serve()`): the two then share it, as one backend answering
+	 * both, WebSocket handshakes coming here and plain requests going there.
+	 */
+	readonly port?: number;
+	/** Default 127.0.0.1. */
+	readonly host?: string;
+	/** Names the server in errors, refusals and logs. Default `<plugin> server`. */
+	readonly name?: string;
+}
+
+/** A connection a served fake accepted: its client is outside the browser. */
+export interface WsServerConnection extends WsConnection {
+	/** Messages the client sent, oldest first. */
+	readonly messages: readonly WsMessage[];
+	/**
+	 * Drop the connection with no close frame, as a dead peer or a lost
+	 * network does: the client sees an abnormal closure, 1006.
+	 */
+	cut(): void;
+}
+
+export interface WsServerMockOptions {
+	/** Take this many connections, then leave the rest to the next rule. */
+	readonly times?: number;
+	/**
+	 * Called for each new connection, e.g. to send a greeting. If it throws,
+	 * the server closes the connection with 1011 and records a `rule-error`
+	 * fault.
+	 */
+	readonly onConnect?: (connection: WsServerConnection) => void | Promise<void>;
+}
+
+export interface WsServerMock {
+	/** Connections this rule took. */
+	readonly hits: number;
+	readonly connections: readonly WsServerConnection[];
+	/** The next connection a client opens (or opened and nobody took). */
+	next(options?: { readonly timeout?: number }): Promise<WsServerConnection>;
+	/** Send to every connection still open; returns how many that was. */
+	broadcast(data: WsData): number;
+	/** New connections go to the next rule, or are refused. */
+	remove(): Promise<void>;
+}
+
+/**
+ * A fake WebSocket server for clients outside the browser — a service under
+ * test, an agent — recorded like the page's own sockets. The newest rule that
+ * matches a handshake's URL takes it; one no rule takes is refused with 404.
+ */
+export interface WsServer {
+	/** `ws://host:port`. */
+	readonly url: string;
+	readonly port: number;
+	/**
+	 * Accept matching connections, as `mock()` does for the page's. `url` is
+	 * matched against `ws://host:port/path?query`; a glob that starts with `/`
+	 * matches the path.
+	 */
+	mock(url: UrlMatcher, options?: WsServerMockOptions): Promise<WsServerMock>;
+	/** This server's frames: handshakes, messages, closes, cuts. */
+	frames(filter?: { readonly endpoint?: string | RegExp }): Promise<Frame[]>;
+	/** Stop accepting and drop open connections. The stage closes it too. */
+	close(): Promise<void>;
+}
+
 export interface WebSocketApi {
 	/** Answer matching WebSockets with a fake server the test drives. */
 	mock(url: UrlMatcher, options?: WsMockOptions): Promise<WsMock>;
@@ -131,4 +202,6 @@ export interface WebSocketApi {
 	proxy(url: UrlMatcher, options?: WsProxyOptions): Promise<WsProxy>;
 	/** Every recorded frame: opens, messages, drops, closes. */
 	frames(filter?: { readonly endpoint?: string | RegExp }): Promise<Frame[]>;
+	/** Serve WebSockets on a port, for clients outside the browser. */
+	serve(options?: WsServeOptions): Promise<WsServer>;
 }

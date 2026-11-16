@@ -1,9 +1,9 @@
 import type { FrameInit, Timeline } from "../../../entities/frame/index.js";
 import type { StreamEnd } from "../../../entities/plugin/index.js";
-import {
-	type ServedRequest,
-	type ServedResponse,
-	serveHttp,
+import type {
+	Ports,
+	ServedRequest,
+	ServedResponse,
 } from "../../../shared/api/http-server/index.js";
 import {
 	type Arrivals,
@@ -32,6 +32,7 @@ export interface ServeDeps {
 	readonly clock: Clock;
 	readonly log: ScopedLogger;
 	readonly correlation: () => string;
+	readonly ports: Ports;
 	/** Told when the server closes, so the plugin can forget it. */
 	readonly onClose: (server: RestServer) => void;
 }
@@ -303,13 +304,13 @@ export async function serveRest(
 		);
 	};
 
-	const listening = await serveHttp(
+	const listening = await deps.ports.listen(
 		{
 			name,
 			...(options.host === undefined ? {} : { host: options.host }),
 			...(options.port === undefined ? {} : { port: options.port }),
 		},
-		handle,
+		{ request: handle },
 	);
 	url = listening.url;
 

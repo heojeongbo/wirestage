@@ -106,11 +106,11 @@ import { json, rest } from "@heojeongbo/wirestage/rest";
 
 export async function fakeMetrics() {
 	const stage = createStage({ plugins: [rest()] });
-	const metrics = await stage.rest.serve({ port: 15391, name: "fake metrics" });
+	const metrics = await stage.rest.serve({ port: 8081, name: "fake metrics" });
 	const queries = await metrics.post("/query", (request) =>
 		json({ rows: [], echoed: request.text().length }),
 	);
-	// …start the client, which sends POST http://127.0.0.1:15391/query…
+	// …start the client, which sends POST http://127.0.0.1:8081/query…
 	await queries.next(); // its first query arrived
 	const calls = await metrics.calls({ path: "/query" });
 	return { stage, calls };
@@ -118,7 +118,10 @@ export async function fakeMetrics() {
 ```
 
 - `serve({ port, host, name, baseURL })`: a fixed `port` that is taken fails
-  with a message naming the server; 0, the default, picks a free one.
+  with a message naming the server; 0, the default, picks a free one. A port
+  one of the same stage's WebSocket fakes listens on (`websocket.serve()`) is
+  shared instead: plain requests come here, WebSocket handshakes go there —
+  one backend with an API and a socket on one port.
   `baseURL` is a path prefix the routes are relative to.
 - Routes are tried newest first, as the page's are. `passthrough()` hands the
   request to the next older route; with none left, the server answers 404.

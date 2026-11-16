@@ -48,3 +48,8 @@ export function isWirestageError(
 		(code === undefined || value.code === code)
 	);
 }
+
+/** What went wrong, in words: an error's message, or anything else thrown as a string. */
+export function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}

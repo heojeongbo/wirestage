@@ -7,8 +7,14 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createSystemClock } from "../lib/clock/index.js";
 import { createScopedLogger } from "../lib/logger/index.js";
-import { listen, serveHttp } from "./http-server/index.js";
+import {
+	createPorts,
+	listen,
+	type PortOptions,
+	type RequestHandler,
+} from "./http-server/index.js";
 import {
 	createStreamServer,
 	type StreamServer,
@@ -70,7 +76,13 @@ describe("listen", () => {
 	});
 });
 
-describe("serveHttp", () => {
+/** A port of its own whose plain requests go to `handle`. */
+const serveHttp = (options: PortOptions, handle: RequestHandler) =>
+	createPorts({ clock: createSystemClock() }).listen(options, {
+		request: handle,
+	});
+
+describe("served plain requests", () => {
 	it("hands each request over whole, and sends what the handler answers", async () => {
 		const seen: unknown[] = [];
 		const server = await serveHttp(

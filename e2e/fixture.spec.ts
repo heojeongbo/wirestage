@@ -109,3 +109,34 @@ test("a data channel is recorded, and goes quiet on demand", async ({
 	const faults = await stage.webrtc.frames({ kind: "fault" });
 	expect(faults.map((frame) => frame.payload.text())).toEqual(["lost"]);
 });
+
+test("served fakes answer a client outside the browser, an API and its socket on one port", async ({
+	stage,
+}) => {
+	const api = await stage.rest.serve({ name: "fake logs" });
+	await api.get("/query", json({ lines: ["one"] }));
+	const sockets = await stage.websocket.serve({
+		port: api.port,
+		name: "fake logs",
+	});
+	await sockets.mock("/tail", {
+		onConnect: (connection) => connection.send("two"),
+	});
+	expect(await (await fetch(`${api.url}/query`)).json()).toEqual({
+		lines: ["one"],
+	});
+	// Node's own WebSocket: the client is this process, not the page.
+	const line = await new Promise<string>((resolve, reject) => {
+		const socket = new WebSocket(`${sockets.url}/tail`);
+		socket.onmessage = (event) => {
+			resolve(String(event.data));
+			socket.close();
+		};
+		socket.onerror = () => reject(new Error("the tail did not open"));
+	});
+	expect(line).toBe("two");
+	expect((await sockets.frames()).map((frame) => frame.source)).toEqual([
+		"network",
+		"server",
+	]);
+});

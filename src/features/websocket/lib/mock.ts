@@ -12,6 +12,7 @@ import type {
 	WsMockOptions,
 } from "../model/types.js";
 import {
+	broadcast,
 	closedError,
 	createSocketLog,
 	encodeOutgoing,
@@ -29,8 +30,6 @@ export async function createMock(
 		clock: context.clock,
 		label: "WebSocket connection",
 	});
-	/** Each connection, with whether it is over: `broadcast` skips those. */
-	const ended = new Map<WsConnection, () => boolean>();
 	const rule = await context.sockets.add({
 		protocol,
 		label: `mock ${String(url)}`,
@@ -72,9 +71,12 @@ export async function createMock(
 				get messages() {
 					return messages.items;
 				},
+				get open() {
+					return !over();
+				},
 				nextMessage: (waitOptions) => messages.next(waitOptions),
 				send(data) {
-					if (over()) throw closedError(socket);
+					if (over()) throw closedError(socket.url.href);
 					const encoded = encodeOutgoing(data);
 					socket.page.send(encoded);
 					log("message", "in", "stub", {}, encoded);
@@ -86,7 +88,6 @@ export async function createMock(
 				closed: closed.promise,
 			};
 			connections.push(connection);
-			ended.set(connection, over);
 			try {
 				await options.onConnect?.(connection);
 			} catch (error) {
@@ -105,10 +106,7 @@ export async function createMock(
 			return connections.items;
 		},
 		next: (waitOptions) => connections.next(waitOptions),
-		broadcast(data) {
-			for (const [connection, isOver] of ended)
-				if (!isOver()) connection.send(data);
-		},
+		broadcast: (data) => broadcast(connections.items, data),
 		remove: () => rule.remove(),
 	};
 }

@@ -815,7 +815,7 @@ describe("served fakes", () => {
 			stage.rest.serve({ port: first.port, name: "fake registry" }),
 		).rejects.toMatchObject({
 			code: "INVALID_STATE",
-			message: `fake registry: 127.0.0.1:${first.port} is already in use`,
+			message: `fake registry: 127.0.0.1:${first.port} is already in use (another of this stage's servers takes its requests)`,
 		});
 		const second = await stage.rest.serve({ host: "127.0.0.1" });
 		await second.close();

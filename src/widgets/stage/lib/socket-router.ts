@@ -7,7 +7,7 @@ import type {
 	SocketView,
 } from "../../../entities/plugin/index.js";
 import type { WebSocketRoutePort } from "../../../shared/api/playwright/index.js";
-import { toBuffer } from "../../../shared/lib/bytes/index.js";
+import { fitUtf8, toBuffer } from "../../../shared/lib/bytes/index.js";
 import { WirestageError } from "../../../shared/lib/errors/index.js";
 import type { ScopedLogger } from "../../../shared/lib/logger/index.js";
 import { compileUrlMatcher } from "../../../shared/lib/match/index.js";
@@ -38,15 +38,11 @@ type CloseOptions = Parameters<SocketPeer["close"]>[0];
 const sendable = (code: number): boolean =>
 	code === 1000 || (code >= 3000 && code <= 4999);
 
-const encoder = new TextEncoder();
-
 /**
  * A close reason cut to what a close frame carries: 123 bytes of UTF-8 (the
  * frame's 125, less the code), ending on a whole character.
  */
-const fitReason = (reason: string): string =>
-	// `encodeInto` stops before the first character that does not fit whole.
-	reason.slice(0, encoder.encodeInto(reason, new Uint8Array(123)).read);
+const fitReason = (reason: string): string => fitUtf8(reason, 123);
 
 /**
  * A close as the server's end can carry it out. Playwright closes that end

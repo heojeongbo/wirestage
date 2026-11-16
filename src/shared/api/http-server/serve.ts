@@ -1,10 +1,6 @@
-import {
-	createServer,
-	type IncomingMessage,
-	type ServerResponse,
-} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { type Listening, type ListenOptions, listen } from "./listen.js";
+import { messageOf } from "../../lib/errors/index.js";
 import {
 	createResponseStream,
 	type OpenResponseEnd,
@@ -47,7 +43,7 @@ export type RequestHandler = (
 	response: ServedResponse,
 ) => void | Promise<void>;
 
-const headersOf = (message: IncomingMessage): Record<string, string> =>
+export const headersOf = (message: IncomingMessage): Record<string, string> =>
 	Object.fromEntries(
 		Object.entries(message.headersDistinct as Record<string, string[]>).map(
 			([name, values]) => [name, values.join(", ")],
@@ -97,40 +93,37 @@ function responderOf(
 }
 
 /**
- * An HTTP/1.1 server for clients outside the browser, handing each request,
- * body read, to `handle`. The handler is the caller's to make safe; one that
- * throws anyway gets a 500 rather than a client left waiting, and closing the
- * server drops open connections at once (`listen`).
+ * Hand a request, body read, to `handle`. The handler is the caller's to
+ * make safe; one that throws anyway gets a 500 naming the server, rather
+ * than a client left waiting.
  */
-export async function serveHttp(
-	options: Omit<ListenOptions, "protocol">,
+export function answerRequest(
+	message: IncomingMessage,
+	response: ServerResponse,
 	handle: RequestHandler,
-): Promise<Listening> {
-	const server = createServer((message, response) => {
-		const responder = responderOf(message, response);
-		readBody(message)
-			.then((body) =>
-				handle(
-					{
-						// Always set on a request an http.Server received.
-						method: message.method as string,
-						url: new URL(message.url as string, listening.url),
-						headers: headersOf(message),
-						body,
-					},
-					responder,
-				),
-			)
-			.catch((error: unknown) => {
-				if (response.headersSent) response.destroy();
-				else
-					void responder.send(
-						500,
-						{ "content-type": "text/plain; charset=utf-8" },
-						`wirestage: ${options.name} failed: ${error instanceof Error ? error.message : String(error)}`,
-					);
-			});
-	});
-	const listening = await listen(server, { ...options, protocol: "http" });
-	return listening;
+	options: { readonly name: string; readonly origin: string },
+): void {
+	const responder = responderOf(message, response);
+	readBody(message)
+		.then((body) =>
+			handle(
+				{
+					// Always set on a request an http.Server received.
+					method: message.method as string,
+					url: new URL(message.url as string, options.origin),
+					headers: headersOf(message),
+					body,
+				},
+				responder,
+			),
+		)
+		.catch((error: unknown) => {
+			if (response.headersSent) response.destroy();
+			else
+				void responder.send(
+					500,
+					{ "content-type": "text/plain; charset=utf-8" },
+					`wirestage: ${options.name} failed: ${messageOf(error)}`,
+				);
+		});
 }

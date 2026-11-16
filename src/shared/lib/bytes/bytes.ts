@@ -22,6 +22,15 @@ export function utf8(bytes: Uint8Array): string {
 	return decoder.decode(bytes);
 }
 
+/**
+ * The longest start of `text` whose UTF-8 fits in `bytes` bytes, ending on a
+ * whole character: a WebSocket close reason has 123.
+ */
+export function fitUtf8(text: string, bytes: number): string {
+	// `encodeInto` stops before the first character that does not fit whole.
+	return text.slice(0, encoder.encodeInto(text, new Uint8Array(bytes)).read);
+}
+
 /** Join chunks into one array. One chunk is returned as is. */
 export function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
 	if (chunks.length === 1) return chunks[0] as Uint8Array;

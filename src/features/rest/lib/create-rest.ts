@@ -168,6 +168,7 @@ export function rest(options: RestOptions = {}): WirePlugin<"rest", RestApi> {
 							clock: context.clock,
 							log: context.log,
 							correlation: servedCorrelation,
+							ports: context.ports,
 							onClose: (closed) => servers.delete(closed),
 						},
 						serveOptions,

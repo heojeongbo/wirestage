@@ -12,4 +12,9 @@ export type {
 	WsProxy,
 	WsProxyConnection,
 	WsProxyOptions,
+	WsServeOptions,
+	WsServer,
+	WsServerConnection,
+	WsServerMock,
+	WsServerMockOptions,
 } from "./model/types.js";

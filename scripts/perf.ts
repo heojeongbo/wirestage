@@ -407,7 +407,9 @@ if (existsSync("dist")) {
 		Buffer.concat(js.map((p) => readFileSync(`dist/${p}`))),
 	).byteLength;
 }
-const GZIP_BUDGET = 64 * 1024;
+// Raised from 64 KiB in 0.5.0 for the served WebSocket server; see
+// docs/performance.md.
+const GZIP_BUDGET = 80 * 1024;
 
 writeFileSync(
 	"perf-results.json",

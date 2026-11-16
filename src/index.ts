@@ -54,6 +54,25 @@ export type {
 	WirePlugin,
 } from "./entities/plugin/index.js";
 export { definePlugin, named } from "./entities/plugin/index.js";
+// The ports served fakes listen on (`PluginContext.ports`): plain requests
+// and WebSockets, shared between plugins on one port.
+export type {
+	Listening,
+	OpenResponse,
+	OpenResponseEnd,
+	PortOptions,
+	PortShare,
+	Ports,
+	RequestHandler,
+	ServedRequest,
+	ServedResponse,
+	ServedStream,
+	ServedUpgrade,
+	ServedWebSocket,
+	ServedWebSocketEnd,
+	UpgradeResponse,
+	WebSocketHandler,
+} from "./shared/api/http-server/index.js";
 // What the stage is handed: a browser context, its pages, its cookie jar.
 export type {
 	ContextPort,

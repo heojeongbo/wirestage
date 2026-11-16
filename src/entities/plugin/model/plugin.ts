@@ -1,3 +1,4 @@
+import type { Ports } from "../../../shared/api/http-server/index.js";
 import type { Clock } from "../../../shared/lib/clock/index.js";
 import type {
 	LogScope,
@@ -43,6 +44,12 @@ export interface PluginContext {
 	readonly sockets: SocketRouter;
 	/** Code that runs inside every page, for what no route can see. */
 	readonly pages: PageHost;
+	/**
+	 * Ports for fakes served to clients outside the browser. The stage's
+	 * plugins share them: one plugin's plain requests and another's
+	 * WebSockets can answer on one port.
+	 */
+	readonly ports: Ports;
 	readonly baseURL: string | undefined;
 	attachments(): readonly Attachment[];
 	/** Flush every page buffer into the timeline. Call before reading frames. */

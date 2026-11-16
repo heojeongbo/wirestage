@@ -4,8 +4,9 @@ import {
 	createFakeContext,
 	type FakeWebSocketRoute,
 } from "../../__fixtures__/fake-playwright.js";
-import { named } from "../../entities/plugin/index.js";
+import { type AnyWirePlugin, named } from "../../entities/plugin/index.js";
 import { createStage } from "../../widgets/stage/index.js";
+import { rest, text } from "../rest/index.js";
 import { type WebSocketOptions, websocket } from "./index.js";
 
 const stages: { dispose(): Promise<void> }[] = [];
@@ -455,5 +456,230 @@ describe("websocket plugin", () => {
 		expect((await stage.chat.frames()).map((f) => f.protocol)).toEqual([
 			"chat",
 		]);
+	});
+});
+
+/** A client outside the browser: Node's own WebSocket. */
+function client(url: string, protocols?: string[]) {
+	const socket = new WebSocket(url, protocols);
+	socket.binaryType = "arraybuffer";
+	const received: (string | Uint8Array)[] = [];
+	socket.addEventListener("message", (event) =>
+		received.push(
+			typeof event.data === "string"
+				? event.data
+				: new Uint8Array(event.data as ArrayBuffer),
+		),
+	);
+	const opened = new Promise<void>((resolve, reject) => {
+		socket.addEventListener("open", () => resolve());
+		socket.addEventListener("error", () =>
+			reject(new Error(`no WebSocket to ${url}`)),
+		);
+	});
+	// Its own catch: a refused handshake is what some tests are about.
+	opened.catch(() => undefined);
+	const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+		socket.addEventListener("close", (event) =>
+			resolve({ code: event.code, reason: event.reason }),
+		),
+	);
+	return { socket, received, opened, closed };
+}
+
+/** Until `check` holds: what a socket does arrives on its own time. */
+async function until(check: () => boolean): Promise<void> {
+	for (let i = 0; i < 400 && !check(); i++)
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	expect(check()).toBe(true);
+}
+
+describe("served WebSockets", () => {
+	const serving = <const Plugins extends readonly AnyWirePlugin[]>(
+		plugins: Plugins,
+	) => {
+		const stage = createStage({ plugins });
+		stages.push(stage);
+		return stage;
+	};
+
+	it("plays the server for a client outside the browser, on the timeline", async () => {
+		const stage = serving([websocket()]);
+		const server = await stage.websocket.serve({ name: "fake feed" });
+		expect(server.url).toBe(`ws://127.0.0.1:${server.port}`);
+		const feed = await server.mock("/feed", {
+			onConnect: (connection) => connection.send("welcome"),
+		});
+		const peer = client(`${server.url}/feed?since=1`, ["v1", "v0"]);
+		await peer.opened;
+		expect(peer.socket.protocol).toBe("v1");
+		const connection = await feed.next();
+		expect(connection.url).toBe(`${server.url}/feed?since=1`);
+		expect(connection.open).toBe(true);
+		await until(() => peer.received.length === 1);
+		peer.socket.send("hi");
+		await expect(connection.nextMessage()).resolves.toMatchObject({
+			direction: "out",
+			data: "hi",
+		});
+		expect(connection.messages.map((message) => message.text())).toEqual([
+			"hi",
+		]);
+		connection.send({ n: 1 });
+		connection.send(new Uint8Array([7]));
+		expect(feed.broadcast("all")).toBe(1);
+		await until(() => peer.received.length === 4);
+		expect(peer.received).toEqual([
+			"welcome",
+			'{"n":1}',
+			new Uint8Array([7]),
+			"all",
+		]);
+		peer.socket.close(4000, "bye");
+		await expect(connection.closed).resolves.toEqual({
+			code: 4000,
+			reason: "bye",
+		});
+		expect(connection.open).toBe(false);
+		expect(() => connection.send("late")).toThrow(
+			expect.objectContaining({ code: "CLOSED" }),
+		);
+		expect(feed.broadcast("nobody")).toBe(0);
+		const frames = await server.frames();
+		expect(shape(frames)).toEqual([
+			"lifecycle none network open",
+			"message in server",
+			"message out network",
+			"message in server",
+			"message in server",
+			"message in server",
+			"lifecycle none network close",
+		]);
+		expect(frames[0]?.meta).toMatchObject({
+			url: `${server.url}/feed?since=1`,
+			protocol: "v1",
+			server: server.url,
+		});
+		expect(frames[0]?.meta["headers"]).toMatchObject({
+			"sec-websocket-protocol": "v1, v0",
+		});
+		expect(
+			frames.every(
+				(frame) =>
+					frame.endpoint === "/feed" &&
+					frame.correlation === frames[0]?.correlation,
+			),
+		).toBe(true);
+		expect(await stage.websocket.frames({ endpoint: "/feed" })).toEqual(frames);
+		expect(await server.frames({ endpoint: "/other" })).toEqual([]);
+	});
+
+	it("refuses a handshake no rule takes; the newest rule takes the rest", async () => {
+		const stage = serving([websocket()]);
+		const server = await stage.websocket.serve();
+		const any = await server.mock("/**");
+		const once = await server.mock("/feed", { times: 1 });
+		await client(`${server.url}/feed`).opened;
+		await client(`${server.url}/feed`).opened;
+		expect([once.hits, any.hits]).toEqual([1, 1]);
+		await any.remove();
+		await any.remove();
+		const refused = client(`${server.url}/feed`);
+		await expect(refused.opened).rejects.toThrow();
+		expect((await refused.closed).code).toBe(1006);
+		const frames = await server.frames();
+		expect(frames.at(-1)?.meta).toMatchObject({
+			reason: "unmatched",
+			status: 404,
+			url: `${server.url}/feed`,
+		});
+		await expect(server.mock("/x", { times: 0 })).rejects.toMatchObject({
+			code: "INVALID_ARGUMENT",
+			message: 'rule "mock /x": times must be a positive integer, got 0',
+		});
+	});
+
+	it("cuts, closes and fails connections, each on record", async () => {
+		const stage = serving([websocket()]);
+		const server = await stage.websocket.serve();
+		const failing = await server.mock("/bad", {
+			onConnect: () => {
+				throw new Error("boom");
+			},
+		});
+		const feed = await server.mock("/feed");
+		const cut = client(`${server.url}/feed`);
+		await cut.opened;
+		const first = await feed.next();
+		first.cut();
+		first.cut();
+		expect(first.open).toBe(false);
+		await expect(cut.closed).resolves.toMatchObject({ code: 1006 });
+		await expect(first.closed).resolves.toEqual({ code: 1006, reason: "" });
+		const closed = client(`${server.url}/feed`);
+		await closed.opened;
+		const second = await feed.next();
+		await second.close({ code: 4001, reason: "done" });
+		await expect(closed.closed).resolves.toEqual({
+			code: 4001,
+			reason: "done",
+		});
+		second.cut();
+		const bad = client(`${server.url}/bad`);
+		await expect(bad.closed).resolves.toEqual({
+			code: 1011,
+			reason: 'wirestage: rule "mock /bad" failed: boom',
+		});
+		expect(failing.hits).toBe(1);
+		// The server's end is over a moment after the client's.
+		await failing.connections[0]?.closed;
+		expect(shape(await server.frames())).toEqual([
+			"lifecycle none network open",
+			"fault none server cut",
+			"lifecycle none network open",
+			"lifecycle none server close",
+			"lifecycle none network open",
+			"fault none server rule-error",
+			"lifecycle none server close",
+		]);
+		await expect(second.close({ code: 1005 })).rejects.toMatchObject({
+			code: "INVALID_ARGUMENT",
+		});
+	});
+
+	it("shares a port with a REST fake, as one backend", async () => {
+		const stage = serving([rest(), websocket()]);
+		const api = await stage.rest.serve({ name: "fake logs" });
+		await api.get("/range", text("lines"));
+		const tail = await stage.websocket.serve({
+			port: api.port,
+			name: "fake logs",
+		});
+		await tail.mock("/tail", {
+			onConnect: (connection) => connection.send("line"),
+		});
+		expect(tail.port).toBe(api.port);
+		expect(await (await fetch(`${api.url}/range`)).text()).toBe("lines");
+		const peer = client(`${tail.url}/tail`);
+		await until(() => peer.received.length === 1);
+		await tail.close();
+		await expect(peer.closed).resolves.toMatchObject({ code: 1006 });
+		// The REST half is still there.
+		expect(await (await fetch(`${api.url}/range`)).text()).toBe("lines");
+		await expect(
+			stage.rest.serve({ port: api.port, name: "second api" }),
+		).rejects.toMatchObject({ code: "INVALID_STATE" });
+	});
+
+	it("closes with the stage, cutting what is still open", async () => {
+		const stage = serving([websocket()]);
+		const server = await stage.websocket.serve({ host: "127.0.0.1" });
+		await server.mock("/**");
+		const peer = client(`${server.url}/live`);
+		await peer.opened;
+		await stage.dispose();
+		await expect(peer.closed).resolves.toMatchObject({ code: 1006 });
+		expect(server.close()).toBe(server.close());
+		await expect(client(`${server.url}/live`).opened).rejects.toThrow();
 	});
 });

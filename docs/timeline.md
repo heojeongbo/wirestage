@@ -27,7 +27,7 @@ With `direction`, `source` says who was talking to whom.
 | `page` | The app in the browser: its requests, the messages it sends. |
 | `network` | The real backend, a real remote peer, or a client outside the browser calling a served fake. |
 | `stub` | A stub: its responses and messages, and the faults it injects (an abort, a dropped message). |
-| `server` | A fake served on a port of its own (`connect.serve()`). |
+| `server` | A fake served on a port of its own (`connect.serve()`, `rest.serve()`, `websocket.serve()`). |
 | `test` | The test itself: markers, messages it injects, calls its drive clients make. |
 
 A request is recorded once however many rules see it, and its response

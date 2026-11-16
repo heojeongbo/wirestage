@@ -464,6 +464,98 @@ describe("websocket in Chromium", () => {
 	});
 });
 
+describe("websocket served to Chromium", () => {
+	type Chat = {
+		seen: string[];
+		protocol: string;
+		closed: { code: number; reason: string } | undefined;
+		socket: WebSocket;
+	};
+	const chat = (page: Page) =>
+		page.evaluate(() => {
+			const { seen, protocol, closed } = (
+				globalThis as unknown as { chat: Chat }
+			).chat;
+			return { seen, protocol, closed };
+		});
+
+	it("speaks to the browser's own WebSocket client, both ways and closing", async () => {
+		// Lazy and ruleless: the page's WebSocket is the browser's own, not
+		// Playwright's stand-in.
+		const { stage, context, page } = await stageOn([websocket({ lazy: true })]);
+		// A route-fulfilled page reaches a loopback server only with it.
+		await context.grantPermissions(["local-network-access"], {
+			origin: ORIGIN,
+		});
+		const server = await stage.websocket.serve();
+		const rooms = await server.mock("/chat", {
+			onConnect: (connection) => connection.send("welcome"),
+		});
+		const open = (url: string) =>
+			page.evaluate((target) => {
+				const state: Chat = {
+					seen: [],
+					protocol: "",
+					closed: undefined,
+					socket: new WebSocket(target, ["v2", "v1"]),
+				};
+				(globalThis as unknown as { chat: Chat }).chat = state;
+				const { socket } = state;
+				socket.binaryType = "arraybuffer";
+				socket.onopen = () => {
+					state.protocol = socket.protocol;
+					// Over 65,535 bytes: the 64-bit length, masked by the browser.
+					socket.send("x".repeat(70_000));
+					socket.send(new Uint8Array([1, 2, 3]));
+				};
+				socket.onmessage = (event) =>
+					state.seen.push(
+						typeof event.data === "string"
+							? event.data
+							: `bytes:${new Uint8Array(event.data as ArrayBuffer).length}`,
+					);
+				socket.onclose = (event) => {
+					state.closed = { code: event.code, reason: event.reason };
+				};
+			}, url);
+		await open(`${server.url}/chat`);
+		const connection = await rooms.next({ timeout: 10_000 });
+		expect(
+			(await connection.nextMessage({ timeout: 10_000 })).text(),
+		).toHaveLength(70_000);
+		expect([...((await connection.nextMessage()).data as Uint8Array)]).toEqual([
+			1, 2, 3,
+		]);
+		connection.send(new Uint8Array(300));
+		await expect
+			.poll(async () => (await chat(page)).seen)
+			.toEqual(["welcome", "bytes:300"]);
+		await connection.close({ code: 4000, reason: "done" });
+		expect(await chat(page)).toEqual({
+			seen: ["welcome", "bytes:300"],
+			protocol: "v2",
+			closed: { code: 4000, reason: "done" },
+		});
+		// And a close the browser starts.
+		await open(`${server.url}/chat`);
+		const second = await rooms.next({ timeout: 10_000 });
+		await page.evaluate(() =>
+			(globalThis as unknown as { chat: Chat }).chat.socket.close(4001, "bye"),
+		);
+		await expect(second.closed).resolves.toEqual({ code: 4001, reason: "bye" });
+		expect(
+			(await server.frames())
+				.filter((f) => f.kind === "lifecycle")
+				.map((f) => [f.meta["event"], f.source]),
+		).toEqual([
+			["open", "network"],
+			["close", "server"],
+			["open", "network"],
+			["close", "network"],
+		]);
+	});
+});
+
 describe("websocket closes in Chromium", () => {
 	interface PageSocket {
 		seen: string[];

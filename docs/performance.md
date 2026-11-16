@@ -17,13 +17,19 @@ micro-benchmarks in `bench/` for exploring a change.
 | webrtc: flush 5,000 recorded sends | ms | 1,500 | 300 |
 | connect: stubbed gRPC-web unary round trip | ms | 10 | 1.2 (p95 1.7) |
 | connect: live stream, test send to page receive | ms | 5 | 0.24 (p95 0.47) |
-| runtime gzip of `dist/*.js` | bytes | 65,536 | 52,152 |
+| runtime gzip of `dist/*.js` | bytes | 81,920 | 72,024 |
 
 Measured in the devcontainer (Node 24.15, Chromium of Playwright 1.60) on an
 Apple M4 Pro host under Docker Desktop. A budget is about five times the
 median measured there: room for a slower CI runner, none for a regression of
 an order of magnitude. The two sub-millisecond latencies get more, because
 scheduling noise is most of what they measure.
+
+The package-size budget is not a multiple of anything: it is the ceiling
+the package agreed to, raised on purpose. 0.5.0 raised it from 64 KiB to
+80 KiB for the served WebSocket server — the RFC 6455 server half and the
+ports the stage's fakes share, about 7 KB of gzip with their comments —
+written here rather than taken as a dependency.
 
 ## Methodology
 

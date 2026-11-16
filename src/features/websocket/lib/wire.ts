@@ -9,17 +9,27 @@ import type {
 } from "../../../entities/plugin/index.js";
 import { toBytes, utf8 } from "../../../shared/lib/bytes/index.js";
 import { WirestageError } from "../../../shared/lib/errors/index.js";
-import type { WsData, WsMessage } from "../model/types.js";
+import type { WsConnection, WsData, WsMessage } from "../model/types.js";
 
 /**
  * What a send to a connection that is over throws. Playwright would drop
  * the message without a word, and the timeline would show it delivered.
  */
-export function closedError(socket: SocketView): WirestageError {
+export function closedError(url: string): WirestageError {
 	return new WirestageError(
 		"CLOSED",
-		`the WebSocket connection to ${socket.url.href} is closed`,
+		`the WebSocket connection to ${url} is closed`,
 	);
+}
+
+/** Send to each connection still open; how many that was. */
+export function broadcast(
+	connections: readonly WsConnection[],
+	data: WsData,
+): number {
+	const open = connections.filter((connection) => connection.open);
+	for (const connection of open) connection.send(data);
+	return open.length;
 }
 
 /** What a test passes to `send`, as the wire carries it. */

@@ -5,7 +5,7 @@ Each pattern here is used because of a concrete problem, named next to it.
 | Pattern | Where | Why |
 | --- | --- | --- |
 | **Plugin (Strategy + Registry)** | `WirePlugin`, `createStage({ plugins })` | The stage knows no protocol. A new protocol is a new plugin, not a change to the stage (open/closed). `PluginApis<P>` types `stage.<name>` from the list. |
-| **Ports and Adapters** | `shared/api/playwright/ports.ts`; `ResponseStream` with its Node adapter in `shared/api/http-server/response-stream.ts` | Playwright and Node are reached through ports, so every branch is unit-testable with fakes, the library has no runtime Playwright import, and the plugin contract names neither. |
+| **Ports and Adapters** | `shared/api/playwright/ports.ts`; `ResponseStream` with its Node adapter in `shared/api/http-server/response-stream.ts`; `Ports` and `ServedWebSocket` over Node's server and sockets in `shared/api/http-server` | Playwright and Node are reached through ports, so every branch is unit-testable with fakes, the library has no runtime Playwright import, and the plugin contract names neither. |
 | **Composition root** | `widgets/stage/lib/create-stage.ts`, `app/playwright` | The only places engines and plugins are constructed; nothing reaches for a global. |
 | **Facade** | `Stage` | One object for attach, read and dispose, over the timeline, the routers, the page host, the stream servers and the plugins. |
 | **Chain of Responsibility** | the rule chain in `http-router.ts` | Newest rule first; a rule that does not match, or answers `fallback`, hands the request to the next. Overrides need no priority numbers, and the chain shares one view of the request. |

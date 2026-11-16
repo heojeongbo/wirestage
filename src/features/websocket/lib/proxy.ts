@@ -118,13 +118,13 @@ export async function createProxy(
 				},
 				nextMessage: (waitOptions) => messages.next(waitOptions),
 				toPage(data) {
-					if (over()) throw closedError(socket);
+					if (over()) throw closedError(socket.url.href);
 					const encoded = encodeOutgoing(data);
 					page.send(encoded);
 					log("message", "in", "test", { injected: true }, encoded);
 				},
 				toServer(data) {
-					if (over()) throw closedError(socket);
+					if (over()) throw closedError(socket.url.href);
 					const encoded = encodeOutgoing(data);
 					server.send(encoded);
 					log("message", "out", "test", { injected: true }, encoded);

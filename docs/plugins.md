@@ -53,6 +53,7 @@ export const typed: Promise<unknown> = stage.graphql.operation("Rooms", { rooms:
 | `http.add(rule)` | An HTTP rule on every attached context, present and future. |
 | `sockets.add(rule)` | A WebSocket rule, likewise. `sockets.prepare()` in `setup` routes sockets from attach, so a rule added mid-test reaches pages already open. |
 | `pages.register(module)` | Code that runs in every frame of every page; `command`, `refresh`. |
+| `ports.listen(options, share)` | A port for a fake served to clients outside the browser: `share.request` takes its plain requests, `share.websocket` its WebSocket handshakes. A port another plugin of the stage listens on is shared, a kind at a time; `close()` gives the share back. |
 | `sync()`, `waitFor()` | Bring the timeline up to date before reading; wait for frames. |
 | `use(plugin)` | Build on another plugin and get its API. |
 | `log` | A logger scoped to the plugin's `scope`. |

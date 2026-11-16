@@ -65,13 +65,15 @@ ones you use.
 | `/rest` | `rest()` | routes with `:params`, `json`/`text`/`bytes` replies and responses that stay open; servers for clients outside the browser | requests and real responses | abort, delay, status | — |
 | `/connect` | `connect()` | Connect, gRPC-web: unary, server streams, whole services | decoded messages and status | fail, abort, hold, cut | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf` |
 | `/sse` | `sse()` | event streams driven from the test | events sent | end, cut | — |
-| `/websocket` | `websocket()` | a fake server, or a proxy in front of the real one | both directions | drop, close | — |
+| `/websocket` | `websocket()` | a fake server, or a proxy in front of the real one; servers for clients outside the browser, alone or on a REST fake's port | both directions | drop, close, cut | — |
 | `/webrtc` | `webrtc()` | inject messages as the peer | every data channel message | suppress either direction | — |
 
 The `connect` plugin also builds typed clients for the real backend
 (`stage.connect.client(Service)`, cookies included) and serves stubs on a port
 of their own for clients outside the browser — native gRPC over HTTP/2
-included (`stage.connect.serve(...)`).
+included (`stage.connect.serve(...)`). `rest` and `websocket` serve fakes for
+such clients too, and two of them on one port make one backend: an HTTP API
+and its WebSocket (`stage.rest.serve(...)`, `stage.websocket.serve(...)`).
 
 A protocol the library does not ship is a plugin you write against the same
 contract the built-in ones use: [docs/plugins.md](docs/plugins.md).

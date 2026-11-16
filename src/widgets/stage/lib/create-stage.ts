@@ -5,6 +5,7 @@ import type {
 	PluginContext,
 	PluginRuntime,
 } from "../../../entities/plugin/index.js";
+import { createPorts } from "../../../shared/api/http-server/index.js";
 import type {
 	ContextPort,
 	CookieJarPort,
@@ -110,6 +111,7 @@ export function createStage<const Plugins extends readonly AnyWirePlugin[]>(
 		flushMs: options.pageFlushMs ?? 25,
 		timeoutMs: options.pageTimeoutMs ?? 2_000,
 	});
+	const ports = createPorts({ clock });
 	const attached = new Map<ContextPort, Attached>();
 	/** Every plugin's runtime, a plugin's own dependencies before it. */
 	const runtimes: PluginRuntime<unknown>[] = [];
@@ -250,6 +252,8 @@ export function createStage<const Plugins extends readonly AnyWirePlugin[]>(
 				() => core.detach(),
 				...[...runtimes].reverse().map((runtime) => () => runtime.dispose?.()),
 				() => streamServer.close(),
+				// Each plugin closes its own servers; what one left open goes too.
+				() => ports.close(),
 			]);
 		},
 	};
@@ -265,7 +269,8 @@ export function createStage<const Plugins extends readonly AnyWirePlugin[]>(
 			refresh: pages.refresh,
 			pageId: pages.pageId,
 		}),
-	} satisfies Pick<PluginContext, "http" | "sockets" | "pages">;
+		ports: Object.freeze({ listen: ports.listen }),
+	} satisfies Pick<PluginContext, "http" | "sockets" | "pages" | "ports">;
 
 	/** Set a plugin up, and whatever it builds on first. */
 	const mount = (plugin: AnyWirePlugin): PluginRuntime<unknown> => {
