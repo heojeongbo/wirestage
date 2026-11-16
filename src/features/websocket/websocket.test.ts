@@ -584,9 +584,9 @@ describe("served WebSockets", () => {
 		expect([once.hits, any.hits]).toEqual([1, 1]);
 		await any.remove();
 		await any.remove();
-		const refused = client(`${server.url}/feed`);
-		await expect(refused.opened).rejects.toThrow();
-		expect((await refused.closed).code).toBe(1006);
+		// Refused: an error, and no open. (Node 22's client sends no close
+		// event after a failed handshake, so the test waits for none.)
+		await expect(client(`${server.url}/feed`).opened).rejects.toThrow();
 		const frames = await server.frames();
 		expect(frames.at(-1)?.meta).toMatchObject({
 			reason: "unmatched",
