@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 (2026-11-16)
+
+- `websocket.serve()`: a fake WebSocket server for clients outside the
+  browser — a service under test, an agent — with the page's `mock()` rules
+  and recording (`source: "network"` for the client, `"server"` for the
+  fake, `meta.server` its URL). A served connection can also `cut()`: no
+  close frame, as a dead peer. The RFC 6455 server half is the library's own,
+  with no dependency.
+- One port for an API and its socket: `rest.serve()` and `websocket.serve()`
+  on the same port of one stage share it, plain requests to the one and
+  WebSocket handshakes to the other. A port with only a WebSocket server
+  answers a plain request with 426.
+- A WebSocket mock's `connection.open` says whether the connection still is,
+  and `broadcast()` returns how many open connections it reached.
+- `PluginContext.ports`: the stage's ports, for a plugin that serves a fake of
+  its own, plain HTTP or WebSocket.
+- The package-size budget is 80 KiB of gzip, up from 64 KiB, for the above.
+
 ## 0.4.0 (2026-11-14)
 
 - `stream(open, init)`: a REST reply that stays open — a watch, a log that
