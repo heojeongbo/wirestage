@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0 (2026-11-18)
+
+- `connect.rewrite(method, edit)`: a call goes on to the real backend with
+  the request the test changed — a poll interval, a page size, an id the page
+  cannot ask for — encoded as the page encoded its own (gRPC-web or Connect,
+  binary or JSON, a POST's body or a GET's query). The edit returns the
+  request to send, so a misspelled field fails to compile. The call is
+  recorded with the page's request as `request`, the rewrite as `forwarded`
+  (source `test`), and the backend's answer.
+- `connect.nextCall(method)`: the next recorded call to a method, waiting for
+  one if needed, whichever rule recorded it; calls made before the first ask
+  count. `settled()` waits for its answer.
+- `RpcCall.requestHeaders`: the headers of a page's call, of a call a client
+  made to a served fake, and of a drive client's call.
+- `connect.serve(routes, { unhandled: { code, message } })` answers calls no
+  route takes with that status, in the caller's protocol, through a handler
+  connect-es builds for the method each call names — a fake of a service with
+  no descriptors to hand.
+- `@heojeongbo/wirestage/h2-proxy`: an HTTP/2 proxy for the browser under
+  test (`startH2Proxy`, `h2ProxyArgs`), so a page holding more open responses
+  than HTTP/1.1's six connections per origin still gets its next request
+  answered; `transformHtml` edits every navigation's document.
+- Fixed: a call two rules passed on — a hold released to a recorded backend —
+  had the backend's answer recorded twice.
+
 ## 0.5.0 (2026-11-16)
 
 - `websocket.serve()`: a fake WebSocket server for clients outside the
