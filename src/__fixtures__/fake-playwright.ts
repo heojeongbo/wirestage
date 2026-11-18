@@ -196,6 +196,11 @@ function refusedHeaders(headers: Record<string, string> | undefined): boolean {
  * whole. Node's http client does that; `fetch` takes a body for complete
  * once the server said `connection: close`, cut or not.
  */
+/** Whether a URL is this machine: a local server, not the page's network. */
+function isLoopback(url: string): boolean {
+	return ["127.0.0.1", "localhost", "[::1]"].includes(new URL(url).hostname);
+}
+
 function forward(
 	url: string,
 	init: {
@@ -678,6 +683,38 @@ export function createFakeContext(
 						...(page === undefined ? {} : { page }),
 					},
 				);
+				/** On to the test's network, where the request then finishes. */
+				const viaNetwork = async (
+					send: NonNullable<typeof network>,
+					url: string,
+					method: string,
+					sentHeaders: Record<string, string>,
+					sentBody: Uint8Array<ArrayBuffer> | undefined,
+				): Promise<Response> => {
+					// Like Playwright: the body is complete before requestfinished fires.
+					const real = await send(
+						new Request(url, {
+							method,
+							headers: sentHeaders,
+							...(sentBody === undefined ? {} : { body: sentBody }),
+						}),
+					);
+					const buffered = new Uint8Array(await real.arrayBuffer());
+					const responseHeaders: Record<string, string> = {};
+					real.headers.forEach((value, name) => {
+						responseHeaders[name] = value;
+					});
+					dispatched.responseValue = fakeResponse(
+						real.status,
+						responseHeaders,
+						buffered,
+					);
+					context.emit("requestfinished", dispatched);
+					return new Response(buffered, {
+						status: real.status,
+						headers: real.headers,
+					});
+				};
 				switch (outcome.kind) {
 					case "fulfill": {
 						// Like Playwright: `set-cookie` takes several values, a value
@@ -704,40 +741,41 @@ export function createFakeContext(
 								{ once: true },
 							);
 						});
-					case "continue":
-						return forward(outcome.options?.url ?? request.url, {
-							method: outcome.options?.method ?? request.method,
-							headers: outcome.options?.headers ?? headers,
-							signal: request.signal,
-							body: request.method === "GET" ? undefined : body,
-						});
-					case "network": {
+					case "continue": {
+						// Like Playwright: `postData` replaces the body, as `url`,
+						// `method` and `headers` replace theirs.
+						const options = outcome.options;
+						const url = options?.url ?? request.url;
+						const method = options?.method ?? request.method;
+						const sentHeaders = options?.headers ?? headers;
+						const sent =
+							method === "GET"
+								? undefined
+								: options?.postData === undefined
+									? body
+									: new Uint8Array(Buffer.from(options.postData));
+						// A redirect to a local server (the stream server, a test's own)
+						// really fetches; anywhere else is the network, where a request
+						// goes on and finishes like any other.
+						return network === undefined || isLoopback(url)
+							? forward(url, {
+									method,
+									headers: sentHeaders,
+									signal: request.signal,
+									body: sent,
+								})
+							: viaNetwork(network, url, method, sentHeaders, sent);
+					}
+					case "network":
 						if (network === undefined)
 							return new Response("no network", { status: 502 });
-						// Like Playwright: the body is complete before requestfinished fires.
-						const real = await network(
-							new Request(request.url, {
-								method: request.method,
-								headers,
-								...(body === undefined ? {} : { body }),
-							}),
+						return viaNetwork(
+							network,
+							request.url,
+							request.method,
+							headers,
+							body,
 						);
-						const buffered = new Uint8Array(await real.arrayBuffer());
-						const responseHeaders: Record<string, string> = {};
-						real.headers.forEach((value, name) => {
-							responseHeaders[name] = value;
-						});
-						dispatched.responseValue = fakeResponse(
-							real.status,
-							responseHeaders,
-							buffered,
-						);
-						context.emit("requestfinished", dispatched);
-						return new Response(buffered, {
-							status: real.status,
-							headers: real.headers,
-						});
-					}
 				}
 			}) as typeof fetch;
 		},

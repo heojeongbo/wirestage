@@ -1,4 +1,10 @@
-import type { DescMessage, DescMethod, MessageShape } from "@bufbuild/protobuf";
+import {
+	type DescMessage,
+	type DescMethod,
+	type MessageShape,
+	toBinary,
+	toJsonString,
+} from "@bufbuild/protobuf";
 import { MethodOptions_IdempotencyLevel } from "@bufbuild/protobuf/wkt";
 import {
 	Code,
@@ -25,6 +31,7 @@ import {
 	decodeRequestBody,
 	decodeResponseBody,
 	detectFormat,
+	encodeRequest,
 	parseMessage,
 	type WireFormat,
 } from "./protocol.js";
@@ -84,6 +91,15 @@ export interface RpcRules {
 		method: DescMethod,
 		view: HttpRequestView,
 	): Promise<HttpOutcome>;
+	/**
+	 * Send a call on to the network with `message` as its request, encoded
+	 * the way the caller encoded its own.
+	 */
+	forward(
+		method: DescMethod,
+		view: HttpRequestView,
+		message: MessageShape<DescMessage>,
+	): HttpOutcome;
 	/** The call a request is, as a stub answers it. */
 	callOf(view: HttpRequestView): CallInfo;
 }
@@ -136,6 +152,17 @@ export function createRpcRules(
 	>();
 	/** Requests whose request side is on the timeline. */
 	const recorded = new WeakSet<HttpRequestView>();
+	/**
+	 * Requests whose passed-through ending is on the timeline. Every rule that
+	 * passed a request on hears how it ended — a hold that released it and the
+	 * recording under it both do — and the answer is recorded once.
+	 */
+	const ended = new WeakSet<HttpRequestView>();
+	const firstEnding = (view: HttpRequestView): boolean => {
+		if (ended.has(view)) return false;
+		ended.add(view);
+		return true;
+	};
 
 	const matchesPath = (requestPath: string) => (url: URL) => {
 		if (base === undefined) return url.pathname.endsWith(requestPath);
@@ -189,6 +216,7 @@ export function createRpcRules(
 		rpcProtocol: detectFormat(view)?.protocol,
 		page: view.page,
 		context: view.context,
+		headers: view.headers,
 		requestRecorded: true,
 	});
 
@@ -219,6 +247,7 @@ export function createRpcRules(
 					data: view.body(),
 					meta: {
 						rpcProtocol: call.rpcProtocol,
+						headers: view.headers,
 						decodeError: String(result.error),
 					},
 					page: call.page,
@@ -301,6 +330,16 @@ export function createRpcRules(
 	return {
 		callOf,
 		handler: createHandler,
+		forward(method, view, message) {
+			// The rule that took the request accepted its format first.
+			const format = detectFormat(view) as WireFormat;
+			const bytes = format.binary
+				? toBinary(method.input, message)
+				: new TextEncoder().encode(
+						toJsonString(method.input, message, options.jsonOptions),
+					);
+			return { type: "continue", ...encodeRequest(format, view, bytes) };
+		},
 		async answer(handler, method, view) {
 			const call = callOf(view);
 			const values = createContextValues().set(kCall, call);
@@ -366,17 +405,21 @@ export function createRpcRules(
 							onPassthroughResponse: (
 								response: PassthroughResponse,
 								view: HttpRequestView,
-							) => recordResponse(method, view, response),
+							) => {
+								if (firstEnding(view)) recordResponse(method, view, response);
+							},
 							onPassthroughFailure: (
 								error: string | undefined,
 								view: HttpRequestView,
-							) =>
-								recorder.fault(
-									{ ...callOf(view), answeredBy: "network" },
-									method,
-									"network",
-									{ error },
-								),
+							) => {
+								if (firstEnding(view))
+									recorder.fault(
+										{ ...callOf(view), answeredBy: "network" },
+										method,
+										"network",
+										{ error },
+									);
+							},
 						}
 					: {}),
 			});

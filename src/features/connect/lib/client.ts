@@ -102,6 +102,9 @@ function recordingInterceptor(
 			from: "test",
 			answeredBy: "network",
 			rpcProtocol: protocol,
+			// What the test's interceptors set; the transport adds the
+			// protocol's own headers after this, closest to the wire.
+			headers: Object.fromEntries(request.header),
 		};
 		const method = request.method;
 		try {

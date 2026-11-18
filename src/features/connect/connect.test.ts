@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { ServerHttp2Session } from "node:http2";
 import type { AddressInfo } from "node:net";
 
-import { create, toBinary } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
 	Code,
 	ConnectError,
@@ -130,7 +130,16 @@ async function setup(
 			useHttpGet: true,
 		}),
 	);
-	return { stage, context, page, web, connectClient, getClient, networkBase };
+	return {
+		stage,
+		context,
+		page,
+		web,
+		connectClient,
+		getClient,
+		networkBase,
+		fetcher,
+	};
 }
 
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
@@ -1351,6 +1360,28 @@ describe("one call, however many rules see it", () => {
 			status: { code: 0, message: "" },
 		});
 		expect(calls[0]?.requests).toHaveLength(1);
+		// The hold and the recording both passed it on, and both heard the
+		// answer: it is still one answer.
+		expect(calls[0]?.responses).toHaveLength(1);
+		expect(calls[0]?.frames.filter((f) => f.kind === "response")).toHaveLength(
+			1,
+		);
+	});
+
+	it("records one fault when a held call goes on to a recorded backend that fails", async () => {
+		const { stage, context } = await setup({
+			baseURL: "/api",
+			record: [EchoService],
+		});
+		const hold = await stage.connect.hold(EchoService.method.say);
+		const dispatched = context.dispatch(sayUrl, sayBody());
+		await (await hold.next()).release();
+		const { request } = await dispatched;
+		request.failureText = "net::ERR_CONNECTION_RESET";
+		context.emit("requestfailed", request);
+		const [call] = await stage.connect.calls(EchoService.method.say);
+		expect(call?.fault).toBe("network");
+		expect(call?.frames.filter((f) => f.kind === "fault")).toHaveLength(1);
 	});
 
 	it("records a recorded call that fails on the network as a fault", async () => {
@@ -1727,5 +1758,318 @@ describe("statusOf", () => {
 		await expect(
 			statusOf(Promise.reject(new TypeError("bug"))),
 		).rejects.toThrow("bug");
+	});
+});
+
+describe("rewritten requests", () => {
+	it("sends the page's call on with the request the test changed, and records both", async () => {
+		const { stage, web, connectClient } = await setup();
+		const rewrite = await stage.connect.rewrite(
+			EchoService.method.say,
+			(request) => {
+				request.text = `${request.text}!`;
+				return request;
+			},
+		);
+		// gRPC-web binary, and Connect JSON: each goes on in its own encoding.
+		await expect(web.say({ text: "a" })).resolves.toMatchObject({
+			text: "real a!",
+		});
+		await expect(connectClient.say({ text: "b" })).resolves.toMatchObject({
+			text: "real b!",
+		});
+		expect(rewrite.hits).toBe(2);
+		const calls = await stage.connect.calls(EchoService.method.say);
+		expect(
+			calls.map((c) => [
+				c.protocol,
+				c.request?.text,
+				c.forwarded?.text,
+				c.responses.map((m) => m.text),
+				c.answeredBy,
+				c.status?.code,
+			]),
+		).toEqual([
+			["grpc-web", "a", "a!", ["real a!"], "network", 0],
+			["connect", "b", "b!", ["real b!"], "network", 0],
+		]);
+		// The page's request is the call's one request; the rewrite is the test's.
+		expect(calls[0]?.requests.map((m) => m.text)).toEqual(["a"]);
+		const forwarded = calls[0]?.frames.filter(
+			(f) => f.meta["rewrite"] === true,
+		);
+		expect(forwarded?.map((f) => f.source)).toEqual(["test"]);
+		// Its bytes are the message the backend got.
+		expect(
+			fromBinary(
+				EchoRequestSchema,
+				forwarded?.[0]?.payload.bytes() ?? new Uint8Array(),
+			).text,
+		).toBe("a!");
+	});
+
+	it("sends a message the edit returns in place of the page's, on a GET and on streams", async () => {
+		const { stage, web, connectClient, getClient, fetcher } = await setup();
+		await stage.connect.rewrite(EchoService.method.peek, () => ({
+			text: "swapped",
+		}));
+		// A Connect GET carries its message in the query, JSON as text...
+		await expect(getClient.peek({ text: "x" })).resolves.toMatchObject({
+			text: "peeked swapped",
+		});
+		// ...and binary as base64url.
+		const binaryGet = createClient(
+			EchoService,
+			createConnectTransport({
+				baseUrl: "http://app.test/api",
+				fetch: fetcher,
+				useHttpGet: true,
+				useBinaryFormat: true,
+			}),
+		);
+		await expect(binaryGet.peek({ text: "y" })).resolves.toMatchObject({
+			text: "peeked swapped",
+		});
+		await stage.connect.rewrite(EchoService.method.watch, (request) =>
+			create(EchoRequestSchema, { text: `${request.text}?` }),
+		);
+		expect(
+			(await collect(web.watch({ text: "w" }))).map((m) => m.text),
+		).toEqual(["real w?"]);
+		expect(
+			(await collect(connectClient.watch({ text: "v" }))).map((m) => m.text),
+		).toEqual(["real v?"]);
+		const [get] = await stage.connect.calls(EchoService.method.peek);
+		expect([get?.request?.text, get?.forwarded?.text]).toEqual([
+			"x",
+			"swapped",
+		]);
+	});
+
+	it("leaves a call it does not match, and one that will not decode, as they were", async () => {
+		const { stage, web, context } = await setup();
+		const rewrite = await stage.connect.rewrite(
+			EchoService.method.say,
+			() => ({ text: "changed" }),
+			{ match: (request) => request.text === "this one" },
+		);
+		await expect(web.say({ text: "another" })).resolves.toMatchObject({
+			text: "real another",
+		});
+		await expect(web.say({ text: "this one" })).resolves.toMatchObject({
+			text: "real changed",
+		});
+		const unmatched = await stage.connect.rewrite(
+			EchoService.method.say,
+			() => ({
+				text: "never",
+			}),
+		);
+		await context.dispatch(
+			"http://app.test/api/wirestage.test.v1.EchoService/Say",
+			{
+				method: "POST",
+				headers: { "content-type": "application/proto" },
+				// Field 1, length 10, one byte of it: no decoder accepts that.
+				body: new Uint8Array([0x0a, 0x0a, 0x41]),
+			},
+		);
+		expect([rewrite.hits, unmatched.hits]).toEqual([1, 1]);
+		// A call the rule does not match is not its to record, as for any stub;
+		// the one that would not decode is on the timeline raw, sent on as it was.
+		const calls = await stage.connect.calls(EchoService.method.say);
+		expect(calls.map((c) => [c.request?.text, c.forwarded?.text])).toEqual([
+			["this one", "changed"],
+			[undefined, undefined],
+		]);
+	});
+});
+
+describe("request headers", () => {
+	it("records the headers each kind of caller sent", async () => {
+		const { stage, web } = await setup({
+			baseURL: "/api",
+			record: [EchoService],
+		});
+		await web.say({ text: "page" }, { headers: { "x-trace": "from-page" } });
+		const [fromPage] = await stage.connect.calls(EchoService.method.say);
+		expect(fromPage?.requestHeaders).toMatchObject({
+			"x-trace": "from-page",
+			"content-type": "application/grpc-web+proto",
+		});
+
+		const url = await backend(REAL);
+		const drive = createStage({ plugins: [connect()] });
+		cleanups.push(() => drive.dispose());
+		await drive.connect
+			.client(EchoService, {
+				baseURL: url,
+				headers: { "x-trace": "from-test" },
+			})
+			.say({ text: "test" });
+		const [fromTest] = await drive.connect.calls(EchoService.method.say);
+		expect(fromTest?.requestHeaders).toMatchObject({ "x-trace": "from-test" });
+
+		const server = await drive.connect.serve((router) =>
+			router.service(EchoService, { say: () => ({ text: "served" }) }),
+		);
+		await createClient(
+			EchoService,
+			createGrpcTransport({ baseUrl: server.url }),
+		).say({ text: "outside" }, { headers: { "x-trace": "from-outside" } });
+		const served = (await drive.connect.calls(EchoService.method.say)).find(
+			(c) => c.caller === "network",
+		);
+		expect(served?.requestHeaders).toMatchObject({
+			"x-trace": "from-outside",
+		});
+		// HTTP/2's pseudo-headers are not headers a page's request has.
+		expect(
+			Object.keys(served?.requestHeaders ?? {}).filter((name) =>
+				name.startsWith(":"),
+			),
+		).toEqual([]);
+	});
+
+	it("keeps the headers of a request that will not decode", async () => {
+		const { stage, context } = await setup({
+			baseURL: "/api",
+			record: [EchoService],
+		});
+		await context.dispatch(
+			"http://app.test/api/wirestage.test.v1.EchoService/Say",
+			{
+				method: "POST",
+				headers: { "content-type": "application/proto", "x-trace": "raw" },
+				body: new Uint8Array([0x0a, 0x0a, 0x41]),
+			},
+		);
+		const [call] = await stage.connect.calls(EchoService.method.say);
+		expect(call?.request).toBeUndefined();
+		expect(call?.requestHeaders).toMatchObject({ "x-trace": "raw" });
+	});
+});
+
+describe("the next call", () => {
+	it("returns calls in order, the ones made before it was asked included, whichever rule recorded them", async () => {
+		const { stage, web } = await setup({
+			baseURL: "/api",
+			record: [EchoService],
+		});
+		await web.say({ text: "one" }, { headers: { "x-trace": "1" } });
+		const first = await stage.connect.nextCall(EchoService.method.say);
+		expect(first).toMatchObject({
+			caller: "page",
+			protocol: "grpc-web",
+			request: { text: "one" },
+			requestHeaders: { "x-trace": "1" },
+		});
+		await stage.connect.unary(EchoService.method.say, { text: "stubbed" });
+		const second = stage.connect.nextCall(EchoService.method.say);
+		await web.say({ text: "two" });
+		await expect(second).resolves.toMatchObject({ request: { text: "two" } });
+		await expect(first.settled()).resolves.toMatchObject({
+			answeredBy: "network",
+			status: { code: 0 },
+			responses: [{ text: "real one" }],
+		});
+		expect(first.correlation).not.toBe((await second).correlation);
+	});
+
+	it("waits for the end of a call, and gives up on one that does not end or does not come", async () => {
+		const clock = createManualClock();
+		const { stage, web } = await setup({ baseURL: "/api" }, { clock });
+		const hold = await stage.connect.hold(EchoService.method.say);
+		const pending = web.say({ text: "held" });
+		const call = await stage.connect.nextCall(EchoService.method.say);
+		const open = call.settled({ timeout: 100 });
+		await clock.advance(100);
+		await expect(open).rejects.toMatchObject({ code: "TIMEOUT" });
+		const ended = call.settled();
+		await (await hold.next()).reply({ text: "answered" });
+		await expect(pending).resolves.toMatchObject({ text: "answered" });
+		await expect(ended).resolves.toMatchObject({
+			answeredBy: "stub",
+			responses: [{ text: "answered" }],
+		});
+		const none = stage.connect.nextCall(EchoService.method.say, {
+			timeout: 50,
+		});
+		await clock.advance(50);
+		await expect(none).rejects.toMatchObject({ code: "TIMEOUT" });
+	});
+});
+
+describe("unhandled methods on a served fake", () => {
+	it("answers a call no route takes with the status asked for, in each protocol, and records it", async () => {
+		const stage = createStage({ plugins: [connect()] });
+		cleanups.push(() => stage.dispose());
+		const server = await stage.connect.serve(() => {}, {
+			unhandled: { code: Code.NotFound, message: "no such room" },
+		});
+		const grpc = createClient(
+			EchoService,
+			createGrpcTransport({ baseUrl: server.url }),
+		);
+		await expect(grpc.say({ text: "x" })).rejects.toMatchObject({
+			code: Code.NotFound,
+			rawMessage: "no such room",
+		});
+		// The handler made for a method is kept for its next call.
+		await expect(grpc.say({ text: "x" })).rejects.toMatchObject({
+			code: Code.NotFound,
+		});
+		await expect(collect(grpc.watch({ text: "w" }))).rejects.toMatchObject({
+			code: Code.NotFound,
+		});
+		const overConnect = (useHttpGet: boolean) =>
+			createClient(
+				EchoService,
+				createNodeConnectTransport({
+					baseUrl: server.url,
+					httpVersion: "2",
+					useHttpGet,
+				}),
+			);
+		await expect(overConnect(false).say({ text: "c" })).rejects.toMatchObject({
+			code: Code.NotFound,
+		});
+		await expect(
+			collect(overConnect(false).watch({ text: "c" })),
+		).rejects.toMatchObject({ code: Code.NotFound });
+		await expect(overConnect(true).peek({ text: "g" })).rejects.toMatchObject({
+			code: Code.NotFound,
+		});
+		const [call] = await stage.connect.calls(EchoService.method.say);
+		expect(call).toMatchObject({
+			caller: "network",
+			answeredBy: "server",
+			protocol: "grpc",
+			status: { code: Code.NotFound, message: "no such room" },
+		});
+	});
+
+	it("answers over HTTP/1.1 too, and a path that names no method with a 404", async () => {
+		const stage = createStage({ plugins: [connect()] });
+		cleanups.push(() => stage.dispose());
+		const server = await stage.connect.serve(() => {}, {
+			protocols: ["grpc-web", "connect"],
+			unhandled: { code: Code.PermissionDenied },
+		});
+		const web = createClient(
+			EchoService,
+			createNodeConnectTransport({ baseUrl: server.url, httpVersion: "1.1" }),
+		);
+		await expect(web.say({ text: "x" })).rejects.toMatchObject({
+			code: Code.PermissionDenied,
+		});
+		// A service with no package is named by its bare name.
+		const bare = await fetch(`${server.url}/Bare/Call`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: "{}",
+		});
+		expect(await bare.json()).toMatchObject({ code: "permission_denied" });
+		expect((await fetch(`${server.url}/`)).status).toBe(404);
 	});
 });

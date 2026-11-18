@@ -8,6 +8,8 @@ export type {
 	HeldCall,
 	HoldOptions,
 	HoldStub,
+	PendingCall,
+	RequestEdit,
 	RpcCall,
 	RpcProtocol,
 	RpcServer,

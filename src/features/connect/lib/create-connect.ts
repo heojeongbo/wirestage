@@ -18,8 +18,10 @@ import type {
 import { assembleCalls } from "./calls.js";
 import { createTransport } from "./client.js";
 import { stubAbort, stubHold } from "./faults.js";
+import { createCallArrivals } from "./next-call.js";
 import { recordService } from "./record.js";
 import { createRecorder, endpointOf } from "./recorder.js";
+import { stubRewrite } from "./rewrite.js";
 import { createRpcRules } from "./rules.js";
 import { serveRoutes } from "./serve.js";
 import { stubFailure, stubService, stubStream, stubUnary } from "./stubs.js";
@@ -49,6 +51,11 @@ function createConnect(context: PluginContext, options: ConnectOptions) {
 	const live = (options.streaming ?? "live") === "live";
 	const recorder = createRecorder(context.timeline, protocol);
 	const rules = createRpcRules(context, options, recorder, protocol);
+	const arrivals = createCallArrivals(
+		context.timeline,
+		context.clock,
+		protocol,
+	);
 	const testCorrelation = createSequence("t");
 	const serverCorrelation = createSequence("s");
 	const servers = new Set<RpcServer>();
@@ -72,7 +79,10 @@ function createConnect(context: PluginContext, options: ConnectOptions) {
 			stubAbort(rules, recorder, method, abortOptions),
 		hold: (method, holdOptions = {}) =>
 			stubHold(context, rules, recorder, method, holdOptions, heldCalls),
+		rewrite: (method, edit, stubOptions = {}) =>
+			stubRewrite(rules, recorder, method, edit, stubOptions),
 		record: (service) => recordService(rules, service),
+		nextCall: (method, nextOptions = {}) => arrivals.next(method, nextOptions),
 		async calls(method) {
 			await context.sync();
 			return assembleCalls(
@@ -153,6 +163,7 @@ function createConnect(context: PluginContext, options: ConnectOptions) {
 			await recording;
 		},
 		async dispose() {
+			arrivals.dispose();
 			for (const letGo of [...heldCalls]) letGo();
 			// A drive client's connection outlives its calls; left open, a
 			// server in the test's own process would wait for it on close.

@@ -141,6 +141,38 @@ A held call is decided once: `reply(message)`, `fail(code)`, `abort()`, or
 real backend when there is none. `hold.releaseAll()` lets go of every held
 call and of every later one: a gate that a slow backend opens.
 
+## Rewriting a call on its way
+
+```ts
+import { expect, test } from "./fixtures.js";
+import { EchoService } from "./gen/echo_pb.js";
+
+test("the backend gets the text in capitals", async ({ page, stage }) => {
+	await stage.connect.rewrite(EchoService.method.say, (request) => {
+		request.text = request.text.toUpperCase();
+		return request;
+	});
+	await page.goto("/");
+	const [call] = await stage.connect.calls(EchoService.method.say);
+	expect(call?.request?.text).toBe("hello");
+	expect(call?.forwarded?.text).toBe("HELLO");
+});
+```
+
+`rewrite()` sends a call on to the real backend with one thing changed: what
+the page cannot ask for, such as a poll interval shorter than any control
+offers or a page size the screen never uses, while the backend still answers
+for real. The edit gets a copy of the page's request and returns the request
+to send — the copy, changed, or another message — so a misspelled field fails
+to compile instead of vanishing on the wire.
+
+The new request is encoded the way the page encoded its own: gRPC-web or
+Connect, binary or JSON, a POST's body or a Connect GET's query. The call is
+recorded with both, the page's as `request` and the rewrite as `forwarded`,
+and with the backend's answer. `match`, `times` and `delayMs` work as on any
+stub; a call that does not decode, or comes in gRPC-web-text, goes on as it
+was.
+
 ## What was called
 
 ```ts
@@ -165,8 +197,36 @@ One request is one call, however many stubs and recorders saw it.
 | `answeredBy` | Who answered: `stub`, `network` (the real backend), `server` (a served fake); `undefined` while nobody has. |
 | `status` | `{ code, message }`, code 0 for OK; `undefined` while the call is open, and when it ended in a fault. |
 | `fault` | Why it ended without a status: `abort`, `cut`, `cancelled`, `network`. |
-| `request`, `requests`, `responses` | The decoded messages. |
+| `request`, `requests`, `responses` | The decoded messages: the caller's, then the answer's. |
+| `forwarded` | The request the backend got instead, when `rewrite()` changed it. |
+| `requestHeaders` | The request's headers, names lower-cased: as the page sent them (cookies included), as a client sent them to a served fake, or as a drive client set them before its transport added the protocol's own. |
 | `protocol`, `page`, `context`, `frames` | How it was called, where from, and the frames it is made of. |
+
+### The next call
+
+```ts
+import { expect, test } from "./fixtures.js";
+import { EchoService } from "./gen/echo_pb.js";
+
+test("Send sends what was typed, traced", async ({ page, stage }) => {
+	await stage.connect.record(EchoService);
+	await page.goto("/");
+	const next = stage.connect.nextCall(EchoService.method.say);
+	await page.getByRole("button", { name: "Send" }).click();
+	const call = await next;
+	expect(call.request?.text).toBe("hello");
+	expect(call.requestHeaders?.["traceparent"]).toMatch(/^00-/);
+	expect((await call.settled()).status?.code).toBe(0);
+});
+```
+
+`nextCall()` waits for the next call to a method that it has not returned yet,
+and calls made before it was asked count. It reads the timeline, not a rule,
+so a call counts whichever rule recorded it — a stub, a hold, a rewrite or a
+recording — and wherever that rule sits among the others; a call nothing
+records never shows up. It resolves as the request lands; `settled()` waits
+for the answer, and both reject with `TIMEOUT` after `timeout` ms (default
+5000), as `settled()` does on a stream the page keeps open.
 
 ## Calling the real backend
 
@@ -225,3 +285,23 @@ Every RPC kind works here, client and bidirectional streaming included. Served
 calls are recorded with `caller: "network"` and `answeredBy: "server"`. A
 fixed port that is taken fails with a message naming it; the server stops with
 the stage.
+
+```ts
+import { Code } from "@connectrpc/connect";
+
+import { test } from "./fixtures.js";
+
+test("a backend the test has no descriptors for", async ({ stage }) => {
+	const server = await stage.connect.serve(() => {}, {
+		unhandled: { code: Code.NotFound, message: "no such room" },
+	});
+	await server.close();
+});
+```
+
+`unhandled` answers every call no route takes with that status, in the
+caller's protocol: connect-es builds a handler for the method each call names,
+so the error is encoded as a server's would be, and the call is recorded under
+that method. It fakes a service whose descriptors the test does not have, or
+one that answers every method alike. Without it, connect-es answers a 404,
+which gRPC clients read as `Unimplemented`.

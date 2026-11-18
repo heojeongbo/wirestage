@@ -4,8 +4,12 @@
  * right about Playwright: route order and fallback, `continue({ url })` onto
  * the stream server, init scripts, bindings and WebSocket routes.
  */
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { Code } from "@connectrpc/connect";
+import { connectNodeAdapter } from "@connectrpc/connect-node";
 import type { Page } from "@playwright/test";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
@@ -27,7 +31,13 @@ import { json, type RestStream, rest, stream } from "../../src/rest.js";
 import { sse } from "../../src/sse.js";
 import { webrtc } from "../../src/webrtc.js";
 import { websocket } from "../../src/websocket.js";
-import { close, contextWithPage, ORIGIN, webSocketServer } from "./harness.js";
+import {
+	close,
+	contextWithPage,
+	launch,
+	ORIGIN,
+	webSocketServer,
+} from "./harness.js";
 
 const disposers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -208,6 +218,74 @@ describe("connect in Chromium", () => {
 			parseTrailerBlock(envelopes[1]?.data ?? new Uint8Array())["grpc-status"],
 		).toBe("0");
 		expect(envelopes[1]?.flags).toBe(EnvelopeFlag.trailer);
+	});
+
+	it("sends a rewritten request on to the real backend, and records what it answered", async () => {
+		// The page and its backend on one real origin: a continued request goes
+		// to the network, so there has to be one.
+		const rpc = connectNodeAdapter({
+			requestPathPrefix: "/api",
+			routes: (router) =>
+				router.service(EchoService, {
+					say: (request) => ({ text: `real ${request.text}` }),
+				}),
+		});
+		const server = createServer((request, response) => {
+			if (request.url !== "/") return rpc(request, response);
+			response.writeHead(200, { "content-type": "text/html" });
+			response.end("<!doctype html><title>t</title>");
+		});
+		await new Promise<void>((resolve) =>
+			server.listen(0, "127.0.0.1", resolve),
+		);
+		const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+		const context = await (await launch()).newContext();
+		const stage = createStage({ plugins: [connect({ baseURL: "/api" })] });
+		await stage.attach(context, { baseURL: origin });
+		disposers.push(async () => {
+			await stage.dispose();
+			await context.close();
+			server.closeAllConnections();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		});
+		await stage.connect.rewrite(EchoService.method.say, (request) => ({
+			text: `${request.text}!`,
+		}));
+		const page = await context.newPage();
+		await page.goto(origin);
+		const bytes = await page.evaluate(
+			async (body) => {
+				const response = await fetch("/api/wirestage.test.v1.EchoService/Say", {
+					method: "POST",
+					headers: {
+						"content-type": "application/grpc-web+proto",
+						"x-grpc-web": "1",
+					},
+					body: new Uint8Array(body),
+				});
+				return [...new Uint8Array(await response.arrayBuffer())];
+			},
+			[...grpcWebCall("browser")],
+		);
+		const { envelopes } = decodeEnvelopes(new Uint8Array(bytes));
+		expect(
+			fromBinary(EchoResponseSchema, envelopes[0]?.data ?? new Uint8Array())
+				.text,
+		).toBe("real browser!");
+		// Playwright reports the continued request's response, as the fake does.
+		await expect
+			.poll(
+				async () =>
+					(await stage.connect.calls(EchoService.method.say))[0]?.status,
+			)
+			.toEqual({ code: 0, message: "" });
+		const [call] = await stage.connect.calls(EchoService.method.say);
+		expect([
+			call?.request?.text,
+			call?.forwarded?.text,
+			call?.responses.map((message) => message.text),
+			call?.answeredBy,
+		]).toEqual(["browser", "browser!", ["real browser!"], "network"]);
 	});
 
 	it("records a stubbed call of a recorded service once, as the stub's answer", async () => {

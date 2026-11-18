@@ -166,6 +166,35 @@ export interface HoldStub<I extends DescMessage, O extends DescMessage>
 	releaseAll(): Promise<void>;
 }
 
+/**
+ * What `rewrite()` does to a request: it gets a copy of the page's and returns
+ * the one to send — that copy, changed, or another message.
+ */
+export type RequestEdit<I extends DescMessage> = (
+	request: MessageShape<I>,
+	view: HttpRequestView,
+) => MessageInitShape<I>;
+
+/** A call `nextCall()` found: its request, with its answer still to come. */
+export interface PendingCall<I extends DescMessage, O extends DescMessage>
+	extends Pick<
+		RpcCall<I, O>,
+		| "correlation"
+		| "caller"
+		| "page"
+		| "context"
+		| "protocol"
+		| "request"
+		| "requestHeaders"
+	> {
+	/**
+	 * The whole call once it is over — answered, failed or faulted. Rejects
+	 * with `TIMEOUT` when it is still open after `timeout` ms (default 5000),
+	 * as a stream the page keeps open is.
+	 */
+	settled(options?: { readonly timeout?: number }): Promise<RpcCall<I, O>>;
+}
+
 /** One recorded RPC, reassembled from its frames. */
 export interface RpcCall<I extends DescMessage, O extends DescMessage> {
 	readonly correlation: string;
@@ -185,9 +214,21 @@ export interface RpcCall<I extends DescMessage, O extends DescMessage> {
 	/** Its browser context (`c1`, ...); undefined for a drive client's. */
 	readonly context: string | undefined;
 	readonly protocol: RpcProtocol | undefined;
-	/** The first request message. */
+	/** The first request message, as the caller sent it. */
 	readonly request: MessageShape<I> | undefined;
 	readonly requests: readonly MessageShape<I>[];
+	/**
+	 * The request's headers, names lower-cased: as the page sent them
+	 * (cookies included), as a client outside the browser sent them to a
+	 * served fake, or as a drive client set them before its transport added
+	 * the protocol's own. Undefined when the request is not on the timeline.
+	 */
+	readonly requestHeaders: Readonly<Record<string, string>> | undefined;
+	/**
+	 * The request the backend got instead of `request`, when `rewrite()`
+	 * changed it on the way. Undefined for a call sent on as it was.
+	 */
+	readonly forwarded: MessageShape<I> | undefined;
 	readonly responses: readonly MessageShape<O>[];
 	/** Undefined while the call is open, and when it ended in a fault. Code 0 is OK. */
 	readonly status:
@@ -239,6 +280,14 @@ export interface ServeOptions {
 	 * includes grpc.
 	 */
 	readonly http2?: boolean;
+	/**
+	 * How a call no route takes is answered: with this error status, in the
+	 * caller's protocol, by connect-es's own handler — and recorded. For a
+	 * fake of a backend the test has no descriptors for, or one that answers
+	 * every method alike. Default: connect-es's 404, which gRPC clients read
+	 * as `Unimplemented`.
+	 */
+	readonly unhandled?: { readonly code: Code; readonly message?: string };
 }
 
 export interface RpcServer {
@@ -286,8 +335,32 @@ export interface ConnectApi {
 		method: DescMethodUnary<I, O> | DescMethodServerStreaming<I, O>,
 		options?: HoldOptions<I>,
 	): Promise<HoldStub<I, O>>;
+	/**
+	 * Send calls to `method` on to the real backend with the request the
+	 * test rewrote: `edit` gets a copy of the page's and returns the request
+	 * to send — the copy, changed, or another. The call is recorded with both — the
+	 * page's as `request`, the rewrite as `forwarded` — and the backend's
+	 * answer. A call that does not decode, or comes in gRPC-web-text, goes on
+	 * as it was.
+	 */
+	rewrite<I extends DescMessage, O extends DescMessage>(
+		method: DescMethodUnary<I, O> | DescMethodServerStreaming<I, O>,
+		edit: RequestEdit<I>,
+		options?: StubOptions<I>,
+	): Promise<StubHandle>;
 	/** Record and decode calls to this service without answering them. */
 	record(service: DescService): Promise<StubHandle>;
+	/**
+	 * The next recorded call to `method` that `nextCall` has not returned yet,
+	 * waiting for one if needed — whichever rule recorded it: a stub, a hold,
+	 * a rewrite, a recording. Calls made before the first `nextCall` count.
+	 * It resolves once the request is on the timeline; `settled()` waits for
+	 * the answer.
+	 */
+	nextCall<I extends DescMessage, O extends DescMessage>(
+		method: DescMethod & { readonly input: I; readonly output: O },
+		options?: { readonly timeout?: number },
+	): Promise<PendingCall<I, O>>;
 	/** Every recorded call to `method`, oldest first. */
 	calls<I extends DescMessage, O extends DescMessage>(
 		method: DescMethod & { readonly input: I; readonly output: O },

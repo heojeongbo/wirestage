@@ -27,6 +27,8 @@ export interface CallInfo {
 	readonly rpcProtocol: RpcProtocol | undefined;
 	readonly page?: string | undefined;
 	readonly context?: string | undefined;
+	/** The request's headers, names lower-cased, when the recorder sees them. */
+	readonly headers?: Readonly<Record<string, string>> | undefined;
 	/**
 	 * The request side is already on the timeline: the rule that took the
 	 * request recorded it before deciding how to answer.
@@ -66,6 +68,8 @@ export interface Recorder {
 		message: unknown,
 		first: boolean,
 	): void;
+	/** The request `rewrite()` sent on in place of the caller's. */
+	forwarded(call: CallInfo, method: DescMethod, message: unknown): void;
 	/** A response-side message. */
 	in(call: CallInfo, method: DescMethod, message: unknown): void;
 	/** The call ended: OK when `error` is undefined. */
@@ -138,7 +142,26 @@ export function createRecorder(timeline: Timeline, protocol: string): Recorder {
 				source: call.from,
 				value,
 				data: () => toBinary(method.input, value),
-				meta: { rpcProtocol: call.rpcProtocol },
+				meta: {
+					rpcProtocol: call.rpcProtocol,
+					...(first && call.headers !== undefined
+						? { headers: call.headers }
+						: {}),
+				},
+			});
+		},
+		forwarded(call, method, message) {
+			const value = asMessage(method.input, message);
+			// The test's message, not the caller's: `requests` stays what the
+			// caller sent, and this is the call's `forwarded`.
+			timeline.append({
+				...base(call, method),
+				kind: "message",
+				direction: "out",
+				source: "test",
+				value,
+				data: () => toBinary(method.input, value),
+				meta: { rpcProtocol: call.rpcProtocol, rewrite: true },
 			});
 		},
 		in(call, method, message) {

@@ -21,11 +21,13 @@ import type {
 import {
 	concatBytes,
 	fromBase64,
+	toBase64,
 	utf8,
 } from "../../../shared/lib/bytes/index.js";
 import {
 	decodeEnvelopes,
 	EnvelopeFlag,
+	encodeEnvelope,
 	parseTrailerBlock,
 } from "../../../shared/lib/envelope/index.js";
 import type { RpcProtocol } from "../model/types.js";
@@ -145,6 +147,37 @@ export function decodeRequestBody(
 				: "grpc-encoding"
 		],
 	);
+}
+
+/**
+ * The request carrying `message` in place of its own, in the request's
+ * format: the body of a POST, the query of a Connect GET. Not for
+ * gRPC-web-text, which no rule of this plugin takes.
+ *
+ * One uncompressed message, however the original was sent: a server reads
+ * each envelope's flag, and an uncompressed one is valid under any
+ * `grpc-encoding`, so the header can stay as the page set it.
+ */
+export function encodeRequest(
+	format: WireFormat,
+	request: Pick<HttpRequestView, "method" | "url">,
+	message: Uint8Array,
+): { readonly body: Uint8Array } | { readonly url: string } {
+	if (format.enveloped) return { body: encodeEnvelope(0, message) };
+	if (request.method !== "GET") return { body: message };
+	const url = new URL(request.url);
+	// Binary always rides as base64url; JSON as text unless the caller chose
+	// base64 too. Either way the encoding the caller picked is kept.
+	url.searchParams.set(
+		"message",
+		url.searchParams.get("base64") === "1"
+			? toBase64(message)
+					.replaceAll("+", "-")
+					.replaceAll("/", "_")
+					.replace(/=+$/, "")
+			: utf8(message),
+	);
+	return { url: url.href };
 }
 
 /** Messages and status from a response the real backend sent. */

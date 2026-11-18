@@ -19,9 +19,14 @@ export function assembleCalls<I extends DescMessage, O extends DescMessage>(
 	}
 	return [...byCall].map(([correlation, own]) => {
 		const first = own[0] as Frame;
+		const rewritten = (frame: Frame) => frame.meta["rewrite"] === true;
 		const requests = own.filter(
-			(frame) => frame.direction === "out" && frame.value !== undefined,
+			(frame) =>
+				frame.direction === "out" &&
+				frame.value !== undefined &&
+				!rewritten(frame),
 		);
+		const opening = own.find((frame) => frame.kind === "request");
 		// Everything that is not the caller's is the answer: messages, the
 		// status, or the fault that stood in for one.
 		const answer = own.findLast((frame) => frame.direction !== "out");
@@ -36,6 +41,10 @@ export function assembleCalls<I extends DescMessage, O extends DescMessage>(
 			protocol: first.meta["rpcProtocol"] as RpcProtocol | undefined,
 			request: requests[0]?.value as MessageShape<I> | undefined,
 			requests: requests.map((frame) => frame.value as MessageShape<I>),
+			requestHeaders: opening?.meta["headers"] as
+				| Readonly<Record<string, string>>
+				| undefined,
+			forwarded: own.findLast(rewritten)?.value as MessageShape<I> | undefined,
 			responses: own
 				.filter(
 					(frame) =>

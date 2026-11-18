@@ -1,4 +1,7 @@
-import { createServer as createHttpServer } from "node:http";
+import {
+	createServer as createHttpServer,
+	type IncomingHttpHeaders,
+} from "node:http";
 import { createServer as createHttp2Server } from "node:http2";
 import type { Server } from "node:net";
 
@@ -14,6 +17,12 @@ import { listen } from "../../../shared/api/http-server/index.js";
 import type { RpcServer, ServeOptions } from "../model/types.js";
 import { detectFormat } from "./protocol.js";
 import { kCall, type Recorder, recordingImpl } from "./recorder.js";
+import { failingImpl } from "./stubs.js";
+import { methodFromPath } from "./unhandled.js";
+
+/** connect-node's handler; its package does not export the type by name. */
+type NodeHandlerFn = ReturnType<typeof connectNodeAdapter>;
+type NodeServerRequest = Parameters<NodeHandlerFn>[0];
 
 export interface ServeDeps {
 	readonly recorder: Recorder;
@@ -65,6 +74,29 @@ function recordingRouter(
 	return proxy;
 }
 
+/**
+ * A Node request's headers as the timeline keeps them: one string each, and
+ * none of HTTP/2's pseudo-headers, which a page's request does not have either.
+ */
+const headersOf = (headers: IncomingHttpHeaders): Record<string, string> =>
+	Object.fromEntries(
+		Object.entries(headers)
+			.filter(([name]) => !name.startsWith(":"))
+			.map(([name, value]) => [name, String(value)]),
+	);
+
+/** The wire format of a call made to a served fake. */
+const formatOf = (request: NodeServerRequest) =>
+	// Node always sets method and url on a server request; the types do not
+	// say so. A Connect GET carries no content type at all.
+	detectFormat({
+		method: String(request.method),
+		url: new URL(String(request.url), "http://localhost"),
+		headers: {
+			"content-type": String(request.headers["content-type"] ?? ""),
+		},
+	});
+
 /** Serve Connect routes on a port of their own, recording every call. */
 export async function serveRoutes(
 	routes: (router: ConnectRouter) => void,
@@ -74,27 +106,26 @@ export async function serveRoutes(
 	const protocols = new Set(
 		options.protocols ?? ["connect", "grpc-web", "grpc"],
 	);
-	const handler = connectNodeAdapter({
+	const served = {
 		connect: protocols.has("connect"),
 		grpcWeb: protocols.has("grpc-web"),
 		grpc: protocols.has("grpc"),
-		routes: (router) => routes(recordingRouter(router, deps)),
-		contextValues: (request) =>
+		contextValues: (request: NodeServerRequest) =>
 			createContextValues().set(kCall, {
 				correlation: deps.correlation(),
 				// A client outside the browser, answered by the served fake.
 				from: "network",
 				answeredBy: "server",
-				// Node always sets method and url on a server request; the types do
-				// not say so. A Connect GET carries no content type at all.
-				rpcProtocol: detectFormat({
-					method: String(request.method),
-					url: new URL(String(request.url), "http://localhost"),
-					headers: {
-						"content-type": String(request.headers["content-type"] ?? ""),
-					},
-				})?.protocol,
+				rpcProtocol: formatOf(request)?.protocol,
+				headers: headersOf(request.headers),
 			}),
+	};
+	const handler = connectNodeAdapter({
+		...served,
+		routes: (router) => routes(recordingRouter(router, deps)),
+		...(options.unhandled === undefined
+			? {}
+			: { fallback: answerUnhandled(options.unhandled, served, deps) }),
 	});
 	const http2 = options.http2 ?? protocols.has("grpc");
 	const server: Server = http2
@@ -110,5 +141,47 @@ export async function serveRoutes(
 		url: listening.url,
 		port: listening.port,
 		close: () => listening.close(),
+	};
+}
+
+/**
+ * Answer calls no route takes with an error status, through a handler made
+ * for the method each call names — one per method and shape, kept — so the
+ * error is encoded by connect-es in whichever protocol the call speaks.
+ */
+function answerUnhandled(
+	unhandled: NonNullable<ServeOptions["unhandled"]>,
+	served: Omit<Parameters<typeof connectNodeAdapter>[0], "routes">,
+	deps: ServeDeps,
+): NodeHandlerFn {
+	const handlers = new Map<string, NodeHandlerFn>();
+	return (request, response) => {
+		const path = new URL(String(request.url), "http://localhost").pathname;
+		const format = formatOf(request);
+		const shape = {
+			streaming: format?.enveloped === true,
+			get: request.method === "GET",
+		};
+		const key = `${shape.streaming}:${shape.get}:${path}`;
+		let handle = handlers.get(key);
+		if (handle === undefined) {
+			const method = methodFromPath(path, shape);
+			// Not an RPC path at all: what connect-es answers it without a fallback.
+			if (method === undefined) {
+				response.writeHead(404);
+				response.end();
+				return;
+			}
+			handle = connectNodeAdapter({
+				...served,
+				routes: (router) =>
+					recordingRouter(router, deps).rpc(
+						method,
+						failingImpl(method, unhandled.code, unhandled.message) as never,
+					),
+			});
+			handlers.set(key, handle);
+		}
+		handle(request, response);
 	};
 }
