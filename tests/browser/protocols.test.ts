@@ -539,6 +539,10 @@ describe("websocket served to Chromium", () => {
 		// And a close the browser starts.
 		await open(`${server.url}/chat`);
 		const second = await rooms.next({ timeout: 10_000 });
+		// Open on the page's side too. The server takes the connection before
+		// the browser has read its 101, and a socket closed while it is still
+		// connecting fails its handshake instead: Chromium sends 1001.
+		await expect.poll(async () => (await chat(page)).protocol).toBe("v2");
 		await page.evaluate(() =>
 			(globalThis as unknown as { chat: Chat }).chat.socket.close(4001, "bye"),
 		);
