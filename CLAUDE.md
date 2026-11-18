@@ -11,6 +11,7 @@ src/index.ts, src/<protocol>.ts   entrypoints: re-export public APIs only
 src/app/playwright                the @playwright/test fixture (composition root)
 src/widgets/stage                 the stage: engines + plugin mounting
 src/features/<protocol>           one plugin per protocol
+src/features/h2-proxy             the browser's HTTP/2 proxy (no plugin; server in shared/api)
 src/entities/frame                Frame, Payload, Timeline (the domain)
 src/entities/plugin               the plugin contract (SPI)
 src/shared/api                    Playwright ports, local servers (infrastructure)

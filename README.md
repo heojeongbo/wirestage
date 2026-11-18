@@ -63,7 +63,7 @@ ones you use.
 | Subpath | Plugin | Fakes | Records | Faults | Extra peers |
 | --- | --- | --- | --- | --- | --- |
 | `/rest` | `rest()` | routes with `:params`, `json`/`text`/`bytes` replies and responses that stay open; servers for clients outside the browser | requests and real responses | abort, delay, status | — |
-| `/connect` | `connect()` | Connect, gRPC-web: unary, server streams, whole services | decoded messages and status | fail, abort, hold, cut | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf` |
+| `/connect` | `connect()` | Connect, gRPC-web: unary, server streams, whole services; a call rewritten on its way to the real backend | decoded messages, request headers and status | fail, abort, hold, cut | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf` |
 | `/sse` | `sse()` | event streams driven from the test | events sent | end, cut | — |
 | `/websocket` | `websocket()` | a fake server, or a proxy in front of the real one; servers for clients outside the browser, alone or on a REST fake's port | both directions | drop, close, cut | — |
 | `/webrtc` | `webrtc()` | inject messages as the peer | every data channel message | suppress either direction | — |
@@ -77,6 +77,10 @@ and its WebSocket (`stage.rest.serve(...)`, `stage.websocket.serve(...)`).
 
 A protocol the library does not ship is a plugin you write against the same
 contract the built-in ones use: [docs/plugins.md](docs/plugins.md).
+
+`/h2-proxy` is not a plugin. It is an HTTP/2 proxy for the browser under
+test, for an app that holds more open responses than the six connections
+Chromium keeps per origin over HTTP/1.1: [docs/h2-proxy.md](docs/h2-proxy.md).
 
 ## The timeline
 
@@ -122,6 +126,7 @@ export async function openSession(browser: Browser) {
 - Protocols: [Connect / gRPC-web / gRPC](docs/protocols/connect.md),
   [REST](docs/protocols/rest.md), [SSE](docs/protocols/sse.md),
   [WebSocket](docs/protocols/websocket.md), [WebRTC](docs/protocols/webrtc.md)
+- [An HTTP/2 proxy for the browser](docs/h2-proxy.md)
 - [Writing a protocol plugin](docs/plugins.md)
 - [Architecture](docs/architecture.md) and [design patterns](docs/design-patterns.md)
 - [Testing](docs/testing.md), [performance](docs/performance.md),

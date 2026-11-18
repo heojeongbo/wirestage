@@ -15,6 +15,7 @@ src/
   app/playwright        composition root for @playwright/test: the fixture
   widgets/stage         the stage: builds the engines, mounts the plugins
   features/<protocol>   connect, rest, sse, websocket, webrtc: one plugin each
+  features/h2-proxy     no plugin: the browser's HTTP/2 proxy, its server in shared/api
   entities/frame        the domain: Frame, Payload, Timeline, filters
   entities/plugin       the plugin contract (SPI): rules, sockets, page modules
   shared/api            infrastructure: Playwright ports, local servers

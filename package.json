@@ -67,6 +67,10 @@
 			"types": "./dist/webrtc.d.ts",
 			"default": "./dist/webrtc.js"
 		},
+		"./h2-proxy": {
+			"types": "./dist/h2-proxy.d.ts",
+			"default": "./dist/h2-proxy.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"publishConfig": {
